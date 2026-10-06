@@ -62,6 +62,7 @@ target_compile_options(curaengine PRIVATE -O2 -fPIC -Wno-deprecated-declarations
 add_library(curaslicer SHARED
         napi_init.cpp
         slicer_bridge.cpp
+        child_entry.cpp
 )
 target_include_directories(curaslicer PRIVATE ${NATIVE_ROOT})
 target_include_directories(curaslicer SYSTEM PRIVATE ${CURA_HARMONY_INCLUDES} ${CURAENGINE_ROOT}/include)
@@ -76,6 +77,7 @@ target_link_libraries(curaslicer PUBLIC
         ${INSTALL}/lib/libtbb.a
         libace_napi.z.so
         libhilog_ndk.z.so
+        libchild_process.so
 )
 
 # Bind intra-library references (including the interposed exit()) to this shared object's own

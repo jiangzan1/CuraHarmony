@@ -1,10 +1,17 @@
 #include "slicer_bridge.h"
 
+#include <AbilityKit/native_child_process.h>
+
+#include <chrono>
 #include <csetjmp>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <spdlog/sinks/base_sink.h>
@@ -165,6 +172,169 @@ int runSlice(const SliceRequest &request, std::string &error_message)
     g_abort_armed = false;
     spdlog::info("CuraHarmony: slice finished");
     return 0;
+}
+
+std::string encodeRequest(const SliceRequest &request)
+{
+    std::string payload = "CURA1\n";
+    payload += request.settings_json_path + "\n";
+    payload += request.output_gcode_path + "\n";
+    payload += request.log_path + "\n";
+    payload += std::to_string(request.model_paths.size()) + "\n";
+    for (const std::string &model_path : request.model_paths)
+    {
+        payload += model_path + "\n";
+    }
+    payload += std::to_string(request.overrides.size()) + "\n";
+    for (const std::string &override_setting : request.overrides)
+    {
+        payload += override_setting + "\n";
+    }
+    return payload;
+}
+
+bool decodeRequest(const std::string &payload, SliceRequest &request)
+{
+    std::vector<std::string> lines;
+    std::string current;
+    for (const char character : payload)
+    {
+        if (character == '\n')
+        {
+            lines.push_back(current);
+            current.clear();
+        }
+        else if (character != '\r')
+        {
+            current.push_back(character);
+        }
+    }
+    if (! current.empty())
+    {
+        lines.push_back(current);
+    }
+
+    if (lines.size() < 5 || lines[0] != "CURA1")
+    {
+        return false;
+    }
+
+    size_t index = 1;
+    request.settings_json_path = lines[index++];
+    request.output_gcode_path = lines[index++];
+    request.log_path = lines[index++];
+
+    const size_t model_count = static_cast<size_t>(std::strtoul(lines[index++].c_str(), nullptr, 10));
+    if (index + model_count > lines.size())
+    {
+        return false;
+    }
+    request.model_paths.clear();
+    for (size_t model_index = 0; model_index < model_count; ++model_index)
+    {
+        request.model_paths.push_back(lines[index++]);
+    }
+
+    if (index >= lines.size())
+    {
+        return false;
+    }
+    const size_t override_count = static_cast<size_t>(std::strtoul(lines[index++].c_str(), nullptr, 10));
+    if (index + override_count > lines.size())
+    {
+        return false;
+    }
+    request.overrides.clear();
+    for (size_t override_index = 0; override_index < override_count; ++override_index)
+    {
+        request.overrides.push_back(lines[index++]);
+    }
+    return true;
+}
+
+std::string statusPathFor(const SliceRequest &request)
+{
+    return request.output_gcode_path + ".status";
+}
+
+namespace
+{
+
+bool readFileIfNonEmpty(const std::string &path, std::string &content)
+{
+    std::ifstream file(path, std::ios::binary);
+    if (! file)
+    {
+        return false;
+    }
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    content = buffer.str();
+    return ! content.empty();
+}
+
+} // namespace
+
+int runSliceInChildProcess(const SliceRequest &request, std::string &error_message)
+{
+    const std::string status_path = statusPathFor(request);
+    // A stale status file from a previous run would make the poll below succeed immediately.
+    std::remove(status_path.c_str());
+
+    const std::string payload = encodeRequest(request);
+
+    NativeChildProcess_Args args;
+    std::memset(&args, 0, sizeof(args));
+    args.entryParams = const_cast<char *>(payload.c_str());
+    NativeChildProcess_Options options;
+    std::memset(&options, 0, sizeof(options));
+    // The child must share the sandbox so it can read the model/profile and write the G-code.
+    options.isolationMode = NCP_ISOLATION_MODE_NORMAL;
+
+    int32_t pid = 0;
+    const Ability_NativeChildProcess_ErrCode start_code = OH_Ability_StartNativeChildProcess("libcuraslicer.so:SliceMain", args, options, &pid);
+    if (start_code != NCP_NO_ERROR)
+    {
+        // 801 (NCP_ERR_NOT_SUPPORTED) on devices without the capability: degrade to an in-process
+        // slice, which works once per application launch.
+        spdlog::warn("CuraHarmony: native child process unavailable (code {}), slicing in-process", static_cast<int>(start_code));
+        return runSlice(request, error_message);
+    }
+
+    constexpr int POLL_MS = 200;
+    constexpr int TIMEOUT_MS = 300000;
+    for (int waited_ms = 0; waited_ms < TIMEOUT_MS; waited_ms += POLL_MS)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(POLL_MS));
+        std::string content;
+        if (! readFileIfNonEmpty(status_path, content))
+        {
+            continue;
+        }
+
+        int result = -1;
+        std::string message;
+        std::istringstream stream(content);
+        std::string first_line;
+        std::getline(stream, first_line);
+        const size_t equals = first_line.find('=');
+        if (equals != std::string::npos)
+        {
+            result = static_cast<int>(std::strtol(first_line.substr(equals + 1).c_str(), nullptr, 10));
+        }
+        std::string rest;
+        std::getline(stream, rest);
+        message = rest;
+
+        if (result != 0)
+        {
+            error_message = message;
+        }
+        return result;
+    }
+
+    error_message = "切片子进程超时";
+    return -1;
 }
 
 } // namespace curaharmony

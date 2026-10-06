@@ -76,7 +76,9 @@ void ExecuteSlice(napi_env env, void *data)
 {
     (void)env;
     SliceContext *context = static_cast<SliceContext *>(data);
-    context->result = curaharmony::runSlice(context->request, context->error_message);
+    // Each slice runs in its own child process: CuraEngine's Application::run() may only be called
+    // once per process, so an in-process second slice would crash.
+    context->result = curaharmony::runSliceInChildProcess(context->request, context->error_message);
 }
 
 void CompleteSlice(napi_env env, napi_status status, void *data)

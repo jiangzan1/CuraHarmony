@@ -39,14 +39,17 @@ ArkTS/ArkUI 表现层
         │
         ├─ 3D 预览：XComponent(SURFACE) ──> librender.so（EGL + GLES3 + STL 解析 + 触摸手势）
         │
-        └─ 切片：NAPI ──> libcuraslicer.so ──> CuraEngine（进程内，非子进程）
+        └─ 切片：NAPI ──> 原生子进程（每次切片一个）──> libcuraslicer.so:SliceMain ──> CuraEngine
                                   ↑
                   resources/rawfile/profiles/default.json（Cura 定义树 + overrides）
 ```
 
-**为什么是「进程内调用」**：CuraEngine 原本是独立可执行程序，桌面版 Cura 用子进程调用；
-鸿蒙应用沙箱不允许执行捆绑的二进制，所以这里把它编成静态库、链接进 `libcuraslicer.so`，
-以等价 argv（`slice --force-read-parent -j <settings> -s k=v ... -l <model> -o <out>`）直接调用。
+**为什么每次切片起一个子进程**：CuraEngine 的 `Application::run()` 明确「一个进程只能调用一次」
+（它对全局静态字段有副作用），同进程内第二次切片会 segfault（实测崩在 `OS_FFRT_*` 工作线程）。
+鸿蒙的 `OH_Ability_StartNativeChildProcess` 让每次切片跑在全新进程里，静态状态天然复位——
+这也正好对齐桌面版 Cura「子进程调用 CuraEngine」的模型。切片请求用行式负载经 `entryParams`
+传入，子进程把结果写入 `<输出>.status`（`code=<n>` + 引擎最后一条日志），父进程轮询读取。
+若设备不支持原生子进程（返回 801），会退化为进程内切片（每次启动可用一次）。
 
 ## 目录结构
 
@@ -134,7 +137,9 @@ CuraEngine 依赖 `scripta`、`cura-formulae-engine`、`zeus_expected`，它们�
 
 1. **许可：Cura 与 CuraEngine 均为 AGPL-3.0**。对外分发本应用会触发 AGPL 的开源义务
    （需公开修改与链接其代码的应用）。商用前务必确认合规。
-2. **`exit()` 拦截是 thread-local**：CuraEngine 约 27 处 `exit()`（缺参数/缺设置）会被拦截并
+2. **CuraEngine 一个进程只能 run 一次**：已通过「每次切片起原生子进程」解决（见架构一节）。
+   若设备不支持子进程而退化为进程内切片，则同一次启动只能切一次。
+3. **`exit()` 拦截是 thread-local**：CuraEngine 约 27 处 `exit()`（缺参数/缺设置）会被拦截并
    优雅失败；但若在 TBB 工作线程上触发，会走 `_Exit()` 直接结束进程。因此正解是**保证设置完整**
    而不是依赖拦截。
 3. **设置文件必须完整**：`-j` 采用的是 Cura「定义树 + overrides」格式（不是扁平键值），
