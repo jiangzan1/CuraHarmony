@@ -87,6 +87,7 @@ function Invoke-BoostRegexBuild {
     if ($LASTEXITCODE -ne 0) { throw 'boost_regex archive failed' }
 }
 
+Invoke-CMakeBuild -Name 'fmt' -Source (Join-Path $deps 'fmt') -Options @{ 'FMT_TEST' = 'OFF'; 'FMT_DOC' = 'OFF'; 'FMT_INSTALL' = 'ON' }
 Invoke-ClipperBuild
 Invoke-CMakeBuild -Name 'zlib' -Source (Join-Path $deps 'zlib') -Options @{ 'ZLIB_BUILD_EXAMPLES' = 'OFF' }
 Invoke-CMakeBuild -Name 'libpng' -Source (Join-Path $deps 'libpng') -Options @{ 'PNG_SHARED' = 'OFF'; 'PNG_TESTS' = 'OFF'; 'PNG_EXECUTABLES' = 'OFF'; 'ZLIB_ROOT' = $install }

@@ -76,3 +76,7 @@ target_link_libraries(curaslicer PUBLIC
         ${INSTALL}/lib/libtbb.a
         libace_napi.z.so
 )
+
+# Bind intra-library references (including the interposed exit()) to this shared object's own
+# definitions rather than the first global symbol. See slicer_bridge.cpp.
+target_link_options(curaslicer PRIVATE -Wl,-Bsymbolic-functions)
