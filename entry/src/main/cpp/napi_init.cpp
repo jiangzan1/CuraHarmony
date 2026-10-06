@@ -69,13 +69,14 @@ struct SliceContext
     napi_deferred deferred = nullptr;
     curaharmony::SliceRequest request;
     int result = -1;
+    std::string error_message;
 };
 
 void ExecuteSlice(napi_env env, void *data)
 {
     (void)env;
     SliceContext *context = static_cast<SliceContext *>(data);
-    context->result = curaharmony::runSlice(context->request);
+    context->result = curaharmony::runSlice(context->request, context->error_message);
 }
 
 void CompleteSlice(napi_env env, napi_status status, void *data)
@@ -89,7 +90,8 @@ void CompleteSlice(napi_env env, napi_status status, void *data)
     }
     else
     {
-        std::string message = "slice failed (status " + std::to_string(context->result) + ")";
+        std::string message = context->error_message.empty() ? "slice failed (status " + std::to_string(context->result) + ")"
+                                                             : context->error_message;
         napi_value text = nullptr;
         napi_create_string_utf8(env, message.c_str(), message.size(), &text);
         napi_value error = nullptr;
@@ -114,21 +116,22 @@ napi_value GetEngineInfo(napi_env env, napi_callback_info info)
 
 napi_value Slice(napi_env env, napi_callback_info info)
 {
-    size_t argc = 3;
-    napi_value args[3] = { nullptr, nullptr, nullptr };
+    size_t argc = 4;
+    napi_value args[4] = { nullptr, nullptr, nullptr, nullptr };
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
     auto context = std::make_unique<SliceContext>();
     if (argc < 3 || !ReadString(env, args[0], context->request.settings_json_path) || !ReadStringArray(env, args[1], context->request.model_paths)
         || !ReadString(env, args[2], context->request.output_gcode_path))
     {
-        napi_value message = nullptr;
-        napi_create_string_utf8(env, "slice expects (settingsPath: string, modelPaths: string[], outputPath: string)", NAPI_AUTO_LENGTH, &message);
         napi_throw_error(env, nullptr, "invalid slice arguments");
         napi_value undefined = nullptr;
         napi_get_undefined(env, &undefined);
-        (void)message;
         return undefined;
+    }
+    if (argc >= 4)
+    {
+        (void)ReadString(env, args[3], context->request.log_path);
     }
 
     napi_value promise = nullptr;

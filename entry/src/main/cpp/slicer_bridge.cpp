@@ -2,9 +2,12 @@
 
 #include <csetjmp>
 #include <cstdlib>
+#include <fstream>
+#include <mutex>
 #include <string>
 #include <vector>
 
+#include <spdlog/sinks/base_sink.h>
 #include <spdlog/spdlog.h>
 
 #include "Application.h"
@@ -20,6 +23,57 @@ namespace
 // UI can report an error. The jump buffer is thread local because slicing runs on a worker thread.
 thread_local std::jmp_buf g_abort_jump;
 thread_local bool g_abort_armed = false;
+
+std::mutex g_log_mutex;
+std::string g_last_message;
+std::ofstream g_log_file;
+bool g_log_file_open = false;
+
+//! Records the most recent log line and mirrors it to the sandbox log file, so that a failed slice
+//! can report CuraEngine's own diagnostic and a crash still leaves a readable trace.
+class CapturingSink final : public spdlog::sinks::base_sink<std::mutex>
+{
+protected:
+    void sink_it_(const spdlog::details::log_msg &msg) override
+    {
+        spdlog::memory_buf_t formatted;
+        formatter_->format(msg, formatted);
+        const std::string text(formatted.data(), formatted.size());
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        g_last_message = text;
+        if (g_log_file_open)
+        {
+            g_log_file << text << '\n';
+            g_log_file.flush();
+        }
+    }
+
+    void flush_() override
+    {
+    }
+};
+
+void installCapturingSink()
+{
+    static bool installed = false;
+    if (installed)
+    {
+        return;
+    }
+    installed = true;
+    if (auto *logger = spdlog::default_logger_raw(); logger != nullptr)
+    {
+        logger->sinks().push_back(std::make_shared<CapturingSink>());
+    }
+}
+
+std::string takeLastMessage()
+{
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    std::string message = g_last_message;
+    g_last_message.clear();
+    return message;
+}
 
 } // namespace
 } // namespace curaharmony
@@ -40,12 +94,30 @@ extern "C" void exit(int status)
 namespace curaharmony
 {
 
-int runSlice(const SliceRequest &request)
+int runSlice(const SliceRequest &request, std::string &error_message)
 {
+    installCapturingSink();
+    (void)takeLastMessage();
+
+    {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        if (g_log_file_open)
+        {
+            g_log_file.close();
+        }
+        g_log_file_open = false;
+        if (! request.log_path.empty())
+        {
+            g_log_file.open(request.log_path, std::ios::out | std::ios::trunc);
+            g_log_file_open = g_log_file.is_open();
+        }
+    }
+
     const int abort_status = setjmp(g_abort_jump);
     if (abort_status != 0)
     {
         g_abort_armed = false;
+        error_message = takeLastMessage();
         spdlog::error("CuraHarmony: CuraEngine aborted the slice (status {})", abort_status);
         return abort_status;
     }
@@ -57,6 +129,11 @@ int runSlice(const SliceRequest &request)
     arguments.reserve(4 + 2 * request.model_paths.size());
     arguments.emplace_back("CuraEngine");
     arguments.emplace_back("slice");
+    // Several settings in Cura's definitions are both a value and a parent of child settings (for
+    // example roofing_layer_count). By default CommandLine::loadJSONSettings() recurses into the
+    // children and then skips the parent's own default_value, which makes CuraEngine abort later on
+    // with "Trying to retrieve setting with no value given". This flag makes it read both.
+    arguments.emplace_back("--force-read-parent");
     arguments.emplace_back("-j");
     arguments.push_back(request.settings_json_path);
     for (const std::string &model_path : request.model_paths)

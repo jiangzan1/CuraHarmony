@@ -75,6 +75,7 @@ target_link_libraries(curaslicer PUBLIC
         ${INSTALL}/lib/libfmt.a
         ${INSTALL}/lib/libtbb.a
         libace_napi.z.so
+        libhilog_ndk.z.so
 )
 
 # Bind intra-library references (including the interposed exit()) to this shared object's own
