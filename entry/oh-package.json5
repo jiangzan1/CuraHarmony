@@ -5,6 +5,8 @@
   "main": "",
   "author": "",
   "license": "",
-  "dependencies": {}
+  "dependencies": {
+    "libcuraslicer.so": "file:./src/main/cpp/types/libcuraslicer"
+  }
 }
 
