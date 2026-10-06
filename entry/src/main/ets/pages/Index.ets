@@ -1,25 +1,28 @@
-import { getEngineInfo, ping, slice } from 'libcuraslicer.so';
-import { fileIo as fs } from '@kit.CoreFileKit';
+import { getEngineInfo, slice } from 'libcuraslicer.so';
+import { fileIo as fs, picker } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { SlicerSetting, createDefaultSettings } from '../model/SlicerSetting';
+import { SettingsPanel } from '../view/SettingsPanel';
 
 const DOMAIN = 0x0000;
 
 @Entry
 @Component
 struct Index {
-  @State pingResult: string = '';
+  @State settings: SlicerSetting[] = createDefaultSettings();
+  @State status: string = '就绪';
+  @State modelName: string = 'cube.stl（内置示例）';
   @State engineInfo: string = '';
-  @State sliceResult: string = '未运行';
-  @State lastLog: string = '';
+  @State logTail: string = '';
 
   aboutToAppear(): void {
-    this.pingResult = ping();
     this.engineInfo = getEngineInfo();
-    // The native preview loads cube.stl from the sandbox, so make sure it is there before the
-    // XComponent surface is created.
     try {
-      this.materialiseRawFile('models/cube.stl', `${getContext(this).filesDir}/cube.stl`);
+      const context = getContext(this);
+      // The native preview reads cube.stl from the sandbox, so seed it before the XComponent
+      // surface is created.
+      this.materialiseRawFile('models/cube.stl', `${context.filesDir}/cube.stl`);
     } catch (error) {
       const err = error as BusinessError;
       hilog.error(DOMAIN, 'CuraSlice', 'MODEL_PREP_FAIL reason=%{public}s', err.message);
@@ -27,9 +30,10 @@ struct Index {
     this.refreshLog();
   }
 
-  // CuraEngine needs real file paths, so the bundled profile and test model are materialised into
-  // the application sandbox before slicing, and the resulting G-code is read back from there.
-  // The 3D preview loads the same cube.stl from that sandbox path on the native side.
+  private filesDir(): string {
+    return getContext(this).filesDir;
+  }
+
   private materialiseRawFile(rawName: string, targetPath: string): void {
     const context = getContext(this);
     const data: Uint8Array = context.resourceManager.getRawFileContentSync(rawName);
@@ -41,19 +45,10 @@ struct Index {
     }
   }
 
-  private logPath(): string {
-    return `${getContext(this).filesDir}/curaengine.log`;
-  }
-
-  private refreshLog(): void {
-    const dir: string = getContext(this).filesDir;
-    this.lastLog = `[render]\n${this.readTail(`${dir}/render.log`, 6)}\n[engine]\n${this.readTail(`${dir}/curaengine.log`, 4)}`;
-  }
-
   private readTail(path: string, count: number): string {
     try {
       if (!fs.accessSync(path)) {
-        return '(无)';
+        return '';
       }
       const lines: string[] = fs.readTextSync(path).split('\n').filter((line: string): boolean => line.length > 0);
       return lines.slice(-count).join('\n');
@@ -63,69 +58,144 @@ struct Index {
     }
   }
 
-  private runSlice(): void {
-    this.sliceResult = '准备中…';
+  private refreshLog(): void {
+    this.logTail = this.readTail(`${this.filesDir()}/curaengine.log`, 4);
+  }
+
+  private async importModel(): Promise<void> {
     try {
-      const context = getContext(this);
-      const dir: string = context.filesDir;
+      const documentPicker = new picker.DocumentViewPicker(getContext(this));
+      const options = new picker.DocumentSelectOptions();
+      options.maxSelectNumber = 1;
+      options.fileSuffixFilters = ['.stl'];
+      const uris: string[] = await documentPicker.select(options);
+      if (uris.length === 0) {
+        return;
+      }
+      const source = fs.openSync(uris[0], fs.OpenMode.READ_ONLY);
+      const target = fs.openSync(`${this.filesDir()}/cube.stl`, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      try {
+        fs.copyFileSync(source.fd, target.fd);
+      } finally {
+        fs.closeSync(source);
+        fs.closeSync(target);
+      }
+      const name: string = uris[0].split('/').pop() ?? 'model.stl';
+      this.modelName = name;
+      this.status = `已导入 ${name}`;
+    } catch (error) {
+      const err = error as BusinessError;
+      this.status = `导入失败：${err.message}`;
+      hilog.error(DOMAIN, 'CuraSlice', 'IMPORT_FAIL reason=%{public}s', err.message);
+    }
+  }
+
+  private runSlice(): void {
+    this.status = '切片中…';
+    try {
+      const dir: string = this.filesDir();
       const settingsPath: string = `${dir}/default.json`;
       const modelPath: string = `${dir}/cube.stl`;
       const outputPath: string = `${dir}/cube.gcode`;
 
       this.materialiseRawFile('profiles/default.json', settingsPath);
-      this.materialiseRawFile('models/cube.stl', modelPath);
+      const overrides: string[] = this.settings.map((item: SlicerSetting): string => item.toOverride());
 
-      this.sliceResult = '切片中…';
-      slice(settingsPath, [modelPath], outputPath, this.logPath())
+      slice(settingsPath, [modelPath], outputPath, `${dir}/curaengine.log`, overrides)
         .then((code: number): void => {
           const size: number = fs.statSync(outputPath).size;
-          const text: string = fs.readTextSync(outputPath);
-          const lines: string[] = text.split('\n');
-          this.sliceResult = `成功 (code ${code})：${size} 字节 / ${lines.length} 行`;
+          const lines: number = fs.readTextSync(outputPath).split('\n').length;
+          this.status = `切片成功：${size} 字节 / ${lines} 层`;
           hilog.info(DOMAIN, 'CuraSlice', 'SLICE_OK code=%{public}d size=%{public}d', code, size);
           this.refreshLog();
         })
         .catch((error: Error): void => {
-          this.sliceResult = `失败：${error.message}`;
+          this.status = `切片失败：${error.message}`;
           hilog.error(DOMAIN, 'CuraSlice', 'SLICE_FAIL reason=%{public}s', error.message);
           this.refreshLog();
         });
     } catch (error) {
       const err = error as BusinessError;
-      this.sliceResult = `准备失败：${err.message}`;
+      this.status = `准备失败：${err.message}`;
     }
   }
 
   build() {
-    Column({ space: 8 }) {
-      // 3D preview: rendered by librender.so (EGL + OpenGL ES 3.0).
-      XComponent({ id: 'curaPreview', type: XComponentType.SURFACE, libraryname: 'render' })
-        .width('100%')
-        .layoutWeight(1)
-        .backgroundColor('#16181c')
-
+    Column() {
+      // Top bar
       Row({ space: 10 }) {
-        Button('切片测试立方体')
+        Text('CuraHarmony')
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#ffffff')
+        Text(this.modelName)
+          .fontSize(12)
+          .fontColor('#8b9099')
+          .layoutWeight(1)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Button('导入模型')
+          .fontSize(13)
+          .height(32)
+          .backgroundColor('#2a2d33')
+          .onClick(() => {
+            this.importModel();
+          })
+        Button('切片')
           .id('sliceButton')
+          .fontSize(13)
+          .height(32)
+          .backgroundColor('#2f6fd0')
           .onClick(() => {
             this.runSlice();
           })
-        Button('刷新日志')
-          .onClick(() => {
-            this.refreshLog();
-          })
       }
+      .width('100%')
+      .height(52)
+      .padding({ left: 14, right: 14 })
+      .backgroundColor('#1b1e23')
 
-      Text(this.sliceResult)
-        .fontSize(13)
-        .fontColor('#888888')
-      Text(this.lastLog)
-        .fontSize(10)
-        .fontColor('#666666')
-        .maxLines(5)
+      // Main area: settings sidebar + 3D preview
+      Row() {
+        Column() {
+          SettingsPanel({ settings: this.settings })
+        }
+        .width(300)
+        .height('100%')
+        .backgroundColor('#161a1f')
+
+        Column() {
+          XComponent({ id: 'curaPreview', type: XComponentType.SURFACE, libraryname: 'render' })
+            .width('100%')
+            .height('100%')
+        }
+        .layoutWeight(1)
+        .height('100%')
+        .backgroundColor('#101317')
+      }
+      .width('100%')
+      .layoutWeight(1)
+
+      // Bottom status bar
+      Row({ space: 10 }) {
+        Text(this.status)
+          .fontSize(12)
+          .fontColor('#c8ccd4')
+          .layoutWeight(1)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(this.engineInfo)
+          .fontSize(10)
+          .fontColor('#5d636d')
+          .maxLines(1)
+      }
+      .width('100%')
+      .height(34)
+      .padding({ left: 14, right: 14 })
+      .backgroundColor('#1b1e23')
     }
     .width('100%')
     .height('100%')
-    .padding(12)
+    .backgroundColor('#101317')
   }
 }

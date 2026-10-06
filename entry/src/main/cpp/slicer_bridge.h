@@ -18,6 +18,8 @@ struct SliceRequest
     //! Optional: file that receives every CuraEngine log line. Kept in the sandbox so a crash still
     //! leaves a readable trace behind.
     std::string log_path;
+    //! Setting overrides, each formatted as "key=value", applied on top of the profile via -s.
+    std::vector<std::string> overrides;
 };
 
 //! Runs one slice synchronously. Returns 0 on success, non-zero otherwise.

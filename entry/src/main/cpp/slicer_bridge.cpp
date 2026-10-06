@@ -126,7 +126,7 @@ int runSlice(const SliceRequest &request, std::string &error_message)
     //   CuraEngine slice -j <settings.json> -l <model> [-l <model> ...] -o <output.gcode>
     // The argv strings must stay alive for the whole call because Application keeps a pointer to them.
     std::vector<std::string> arguments;
-    arguments.reserve(4 + 2 * request.model_paths.size());
+    arguments.reserve(6 + 2 * request.model_paths.size() + 2 * request.overrides.size());
     arguments.emplace_back("CuraEngine");
     arguments.emplace_back("slice");
     // Several settings in Cura's definitions are both a value and a parent of child settings (for
@@ -136,6 +136,13 @@ int runSlice(const SliceRequest &request, std::string &error_message)
     arguments.emplace_back("--force-read-parent");
     arguments.emplace_back("-j");
     arguments.push_back(request.settings_json_path);
+    // Overrides must be applied while the global stack is still the active one, i.e. before -l
+    // switches the active stack to the mesh.
+    for (const std::string &override_setting : request.overrides)
+    {
+        arguments.emplace_back("-s");
+        arguments.push_back(override_setting);
+    }
     for (const std::string &model_path : request.model_paths)
     {
         arguments.emplace_back("-l");

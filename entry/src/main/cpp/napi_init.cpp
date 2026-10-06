@@ -116,8 +116,8 @@ napi_value GetEngineInfo(napi_env env, napi_callback_info info)
 
 napi_value Slice(napi_env env, napi_callback_info info)
 {
-    size_t argc = 4;
-    napi_value args[4] = { nullptr, nullptr, nullptr, nullptr };
+    size_t argc = 5;
+    napi_value args[5] = { nullptr, nullptr, nullptr, nullptr, nullptr };
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
     auto context = std::make_unique<SliceContext>();
@@ -132,6 +132,10 @@ napi_value Slice(napi_env env, napi_callback_info info)
     if (argc >= 4)
     {
         (void)ReadString(env, args[3], context->request.log_path);
+    }
+    if (argc >= 5)
+    {
+        (void)ReadStringArray(env, args[4], context->request.overrides);
     }
 
     napi_value promise = nullptr;
