@@ -1,42 +1,56 @@
 {
-  "app": {
-    "signingConfigs": [],
-    "products": [
+  app: {
+    signingConfigs: [
       {
-        "name": "default",
-        "signingConfig": "default",
-        "targetSdkVersion": "26.0.0",
-        "compatibleSdkVersion": "26.0.0",
-        "runtimeOS": "HarmonyOS",
-        "buildOption": {
-          "strictMode": {
-            "caseSensitiveCheck": true,
-            "useNormalizedOHMUrl": true
-          }
-        }
-      }
+        name: 'default',
+        type: 'HarmonyOS',
+        material: {
+          certpath: 'C:\\Users\\jiangzan\\.ohos\\config\\default_CuraHarmony_h7HHmB9GbDptSr79QtVXbslyhN0OlhAfWUiLFlho=.cer',
+          keyAlias: 'debugKey',
+          keyPassword: '0000001b33f2cdb78e7810e6367ad1a96fdca754d35aaa42edd3032269fdf2f33bebd307ad7f15d3931693',
+          profile: 'C:\\Users\\jiangzan\\.ohos\\config\\default_CuraHarmony_h7HHmB9GbDptSr79QtVXbslyhN0OlhAfWUiLFlho=.p7b',
+          signAlg: 'SHA256withECDSA',
+          storeFile: 'C:\\Users\\jiangzan\\.ohos\\config\\default_CuraHarmony_h7HHmB9GbDptSr79QtVXbslyhN0OlhAfWUiLFlho=.p12',
+          storePassword: '0000001b33f2cdb78e7810e6367ad1a96fdca754d35aaa42edd3032269fdf2f33bebd307ad7f15d3931693',
+        },
+      },
     ],
-    "buildModeSet": [
+    products: [
       {
-        "name": "debug",
+        name: 'default',
+        signingConfig: 'default',
+        targetSdkVersion: '26.0.0',
+        compatibleSdkVersion: '26.0.0',
+        runtimeOS: 'HarmonyOS',
+        buildOption: {
+          strictMode: {
+            caseSensitiveCheck: true,
+            useNormalizedOHMUrl: true,
+          },
+        },
+      },
+    ],
+    buildModeSet: [
+      {
+        name: 'debug',
       },
       {
-        "name": "release"
-      }
-    ]
+        name: 'release',
+      },
+    ],
   },
-  "modules": [
+  modules: [
     {
-      "name": "entry",
-      "srcPath": "./entry",
-      "targets": [
+      name: 'entry',
+      srcPath: './entry',
+      targets: [
         {
-          "name": "default",
-          "applyToProducts": [
-            "default"
-          ]
-        }
-      ]
-    }
-  ]
+          name: 'default',
+          applyToProducts: [
+            'default',
+          ],
+        },
+      ],
+    },
+  ],
 }
