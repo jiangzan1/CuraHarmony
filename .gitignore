@@ -11,3 +11,5 @@
 **/.test
 /.appanalyzer
 /.cache
+# Vendored upstream sources (Cura, CuraEngine, conan recipes, build deps)
+/third_party
