@@ -13,3 +13,5 @@
 /.cache
 # Vendored upstream sources (Cura, CuraEngine, conan recipes, build deps)
 /third_party
+# Local native build trees used for fast iteration (hvigor builds under entry/build)
+/build-native

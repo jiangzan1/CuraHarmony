@@ -1,4 +1,0 @@
-E:/Users/jiangzan/cura/CuraHarmony/build-native/arm64/CMakeFiles/curaengine.dir
-E:/Users/jiangzan/cura/CuraHarmony/build-native/arm64/CMakeFiles/curaslicer.dir
-E:/Users/jiangzan/cura/CuraHarmony/build-native/arm64/CMakeFiles/edit_cache.dir
-E:/Users/jiangzan/cura/CuraHarmony/build-native/arm64/CMakeFiles/rebuild_cache.dir
