@@ -81,3 +81,20 @@ target_link_libraries(curaslicer PUBLIC
 # Bind intra-library references (including the interposed exit()) to this shared object's own
 # definitions rather than the first global symbol. See slicer_bridge.cpp.
 target_link_options(curaslicer PRIVATE -Wl,-Bsymbolic-functions)
+
+# ---------------------------------------------------------------------------
+# 3D preview (XComponent surface + OpenGL ES 3.0).
+# ---------------------------------------------------------------------------
+add_library(render SHARED
+        render/render_plugin.cpp
+)
+target_include_directories(render PRIVATE ${NATIVE_ROOT})
+target_include_directories(render SYSTEM PRIVATE ${CURA_HARMONY_INCLUDES})
+target_link_libraries(render PUBLIC
+        libace_napi.z.so
+        libace_ndk.z.so
+        libnative_window.so
+        libEGL.so
+        libGLESv3.so
+        libhilog_ndk.z.so
+)
