@@ -26,24 +26,18 @@ export struct SettingsPanel {
   }
 
   build() {
-    Scroll() {
-      Column() {
-        Text('打印设置')
-          .fontSize(15)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#ffffff')
-          .width('100%')
-          .padding({ bottom: 4 })
-        ForEach(SETTING_GROUPS, (groupName: string) => {
-          this.groupSection(groupName)
-        }, (groupName: string): string => groupName)
-      }
-      .width('100%')
-      .padding(12)
-      .alignItems(HorizontalAlign.Start)
+    Column() {
+      Text('打印设置')
+        .fontSize(15)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#ffffff')
+        .width('100%')
+        .padding({ bottom: 4 })
+      ForEach(SETTING_GROUPS, (groupName: string) => {
+        this.groupSection(groupName)
+      }, (groupName: string): string => groupName)
     }
     .width('100%')
-    .height('100%')
-    .scrollBar(BarState.Auto)
+    .alignItems(HorizontalAlign.Start)
   }
 }

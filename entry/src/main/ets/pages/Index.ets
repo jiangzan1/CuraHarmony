@@ -4,6 +4,8 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { SlicerSetting, createDefaultSettings } from '../model/SlicerSetting';
 import { SettingsPanel } from '../view/SettingsPanel';
+import { PrinterPanel } from '../view/PrinterPanel';
+import { UsbPrinterService } from '../service/UsbPrinterService';
 
 const DOMAIN = 0x0000;
 
@@ -11,6 +13,8 @@ const DOMAIN = 0x0000;
 @Component
 struct Index {
   @State settings: SlicerSetting[] = createDefaultSettings();
+  @State printer: UsbPrinterService = new UsbPrinterService();
+  @State gcodePath: string = '';
   @State status: string = '就绪';
   @State modelName: string = 'cube.stl（内置示例）';
   @State engineInfo: string = '';
@@ -18,6 +22,8 @@ struct Index {
 
   aboutToAppear(): void {
     this.engineInfo = getEngineInfo();
+    this.gcodePath = `${getContext(this).filesDir}/cube.gcode`;
+    this.printer.refreshPorts();
     try {
       const context = getContext(this);
       // The native preview reads cube.stl from the sandbox, so seed it before the XComponent
@@ -158,9 +164,21 @@ struct Index {
       // Main area: settings sidebar + 3D preview
       Row() {
         Column() {
-          SettingsPanel({ settings: this.settings })
+          Scroll() {
+            Column({ space: 8 }) {
+              PrinterPanel({ printer: this.printer, gcodePath: this.gcodePath })
+              Divider().color('#2a2d33')
+              SettingsPanel({ settings: this.settings })
+            }
+            .width('100%')
+            .padding(12)
+            .alignItems(HorizontalAlign.Start)
+          }
+          .width('100%')
+          .height('100%')
+          .scrollBar(BarState.Auto)
         }
-        .width(300)
+        .width(320)
         .height('100%')
         .backgroundColor('#161a1f')
 
