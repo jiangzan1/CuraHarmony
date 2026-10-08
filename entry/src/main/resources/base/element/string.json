@@ -2,15 +2,15 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "module description"
+      "value": "CuraHarmony 3D 打印切片工具"
     },
     {
       "name": "EntryAbility_desc",
-      "value": "description"
+      "value": "CuraHarmony：导入 STL、3D 预览、切片并 USB 串口打印"
     },
     {
       "name": "EntryAbility_label",
-      "value": "label"
+      "value": "CuraHarmony"
     }
   ]
 }

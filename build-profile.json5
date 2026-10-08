@@ -7,11 +7,11 @@
         material: {
           certpath: 'C:\\Users\\jiangzan\\.ohos\\config\\default_CuraHarmony_h7HHmB9GbDptSr79QtVXbslyhN0OlhAfWUiLFlho=.cer',
           keyAlias: 'debugKey',
-          keyPassword: '0000001b33f2cdb78e7810e6367ad1a96fdca754d35aaa42edd3032269fdf2f33bebd307ad7f15d3931693',
+          keyPassword: '0000001baf3b31d91db5cbc87df13129b91b8a0b1ae49ce55f6ce3b19edf6d9cd8de01ccd066aaebe44cbb',
           profile: 'C:\\Users\\jiangzan\\.ohos\\config\\default_CuraHarmony_h7HHmB9GbDptSr79QtVXbslyhN0OlhAfWUiLFlho=.p7b',
           signAlg: 'SHA256withECDSA',
           storeFile: 'C:\\Users\\jiangzan\\.ohos\\config\\default_CuraHarmony_h7HHmB9GbDptSr79QtVXbslyhN0OlhAfWUiLFlho=.p12',
-          storePassword: '0000001b33f2cdb78e7810e6367ad1a96fdca754d35aaa42edd3032269fdf2f33bebd307ad7f15d3931693',
+          storePassword: '0000001baf3b31d91db5cbc87df13129b91b8a0b1ae49ce55f6ce3b19edf6d9cd8de01ccd066aaebe44cbb',
         },
       },
     ],

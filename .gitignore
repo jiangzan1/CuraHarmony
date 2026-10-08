@@ -15,3 +15,6 @@
 /third_party
 # Local native build trees used for fast iteration (hvigor builds under entry/build)
 /build-native
+# Store/pre-release artifacts and local signing backups (not source)
+/publish
+/build-profile.debug.json5.bak

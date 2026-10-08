@@ -17,11 +17,14 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -42,6 +45,9 @@ const char *FILES_DIR_CANDIDATES[] = {
     "/data/storage/el2/base/haps/entry/files",
     "/data/storage/el2/base/files",
 };
+
+// How often the render loop wakes up to look for a freshly imported mesh while the scene is static.
+constexpr int RELOAD_POLL_MS = 300;
 
 std::string filesDir()
 {
@@ -65,6 +71,16 @@ std::string renderLogPath()
     return filesDir() + "/render.log";
 }
 
+std::string viewModePath()
+{
+    return filesDir() + "/view_mode";
+}
+
+std::string plateSizePath()
+{
+    return filesDir() + "/plate_size";
+}
+
 // Appends to a sandbox log file (the UI shows its tail) in addition to hilog.
 void writeRenderLog(const std::string &message)
 {
@@ -76,6 +92,26 @@ void writeRenderLog(const std::string &message)
         std::fclose(file);
     }
     OH_LOG_INFO(LOG_APP, "%{public}s", message.c_str());
+}
+
+// Change stamp of the mesh file. The renderer cannot be driven from ArkTS (the library is loaded by
+// the XComponent, not imported), so the render loop polls the file's mtime and reloads when the
+// ArkTS side overwrites cube.stl with an imported model.
+struct FileStamp
+{
+    long long seconds{ 0 };
+    long long nanoseconds{ 0 };
+    bool valid{ false };
+};
+
+FileStamp fileStamp(const std::string &path)
+{
+    struct stat info;
+    if (stat(path.c_str(), &info) != 0)
+    {
+        return FileStamp{};
+    }
+    return FileStamp{ static_cast<long long>(info.st_mtim.tv_sec), static_cast<long long>(info.st_mtim.tv_nsec), true };
 }
 
 struct MeshData
@@ -364,6 +400,8 @@ struct Renderer
     std::mutex mutex;
     std::atomic<bool> running{ false };
     std::thread thread;
+    std::condition_variable wake;
+    bool dirty{ true }; // set when the frame must be redrawn (interaction, resize, reload)
 
     EGLDisplay display = EGL_NO_DISPLAY;
     EGLSurface surface = EGL_NO_SURFACE;
@@ -378,10 +416,19 @@ struct Renderer
     GLuint grid_vbo = 0;
     GLsizei mesh_vertex_count = 0;
     GLsizei grid_vertex_count = 0;
+    GLint mesh_mvp_location = -1;
+    GLint mesh_color_location = -1;
+    GLint line_mvp_location = -1;
+    GLint line_color_location = -1;
 
     MeshData mesh;
     Vec3 mesh_offset{};   // moves the model so it sits on the build plate and is centred
     float mesh_scale = 1.0F;
+    FileStamp mesh_stamp{}; // mtime of the mesh file last loaded
+    Vec3 plate_offset{};    // model position on the build plate (world XY, mm)
+    float plate_width = 200.0F;
+    float plate_depth = 200.0F;
+    FileStamp plate_stamp{}; // mtime of the plate-size file last loaded
 
     int surface_width = 1;
     int surface_height = 1;
@@ -396,26 +443,71 @@ struct Renderer
     float last_touch_x = 0.0F;
     float last_touch_y = 0.0F;
     float last_pinch_distance = 0.0F;
+    float last_center_x = 0.0F;
+    float last_center_y = 0.0F;
+    bool translate_mode{ false }; // single-pointer drag moves the model instead of orbiting
 };
 
 Renderer g_renderer;
 
+// Default camera distance so the whole build plate fits in view.
+float defaultCameraDistance(const Renderer &renderer)
+{
+    return std::fmax(160.0F, std::fmax(renderer.plate_width, renderer.plate_depth) * 0.95F);
+}
+
+// Reads the build-plate size written by the ArkTS layer ("<width> <depth>" in mm). Invalid or
+// missing content keeps the current value, so a partially typed number cannot collapse the plate.
+void readPlateSize(Renderer &renderer)
+{
+    FILE *file = std::fopen(plateSizePath().c_str(), "rb");
+    if (file == nullptr)
+    {
+        return;
+    }
+    char buffer[64] = {};
+    const size_t read = std::fread(buffer, 1, sizeof(buffer) - 1, file);
+    std::fclose(file);
+    if (read == 0)
+    {
+        return;
+    }
+    float width = 0.0F;
+    float depth = 0.0F;
+    if (std::sscanf(buffer, "%f %f", &width, &depth) == 2 && width >= 10.0F && depth >= 10.0F)
+    {
+        renderer.plate_width = std::fmin(width, 1000.0F);
+        renderer.plate_depth = std::fmin(depth, 1000.0F);
+    }
+}
+
+// Builds (or rebuilds) the build-plate grid for the current plate size. Reusing the VAO/VBO makes it
+// safe to call again when the user changes the printer dimensions.
 void buildGrid(Renderer &renderer)
 {
-    // A simple build plate: 200 x 200 mm outline plus 10 mm grid lines.
-    const float half = 100.0F;
+    const float half_x = renderer.plate_width * 0.5F;
+    const float half_y = renderer.plate_depth * 0.5F;
     const float step = 10.0F;
     std::vector<float> lines;
-    for (float offset = -half; offset <= half + 0.5F; offset += step)
+    for (float x = -half_x; x <= half_x + 0.5F; x += step)
     {
-        lines.insert(lines.end(), { offset, -half, 0.0F, offset, half, 0.0F });
-        lines.insert(lines.end(), { -half, offset, 0.0F, half, offset, 0.0F });
+        lines.insert(lines.end(), { x, -half_y, 0.0F, x, half_y, 0.0F });
+    }
+    for (float y = -half_y; y <= half_y + 0.5F; y += step)
+    {
+        lines.insert(lines.end(), { -half_x, y, 0.0F, half_x, y, 0.0F });
     }
     renderer.grid_vertex_count = static_cast<GLsizei>(lines.size() / 3);
 
-    glGenVertexArrays(1, &renderer.grid_vao);
+    if (renderer.grid_vao == 0)
+    {
+        glGenVertexArrays(1, &renderer.grid_vao);
+    }
+    if (renderer.grid_vbo == 0)
+    {
+        glGenBuffers(1, &renderer.grid_vbo);
+    }
     glBindVertexArray(renderer.grid_vao);
-    glGenBuffers(1, &renderer.grid_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, renderer.grid_vbo);
     glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(lines.size() * sizeof(float)), lines.data(), GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
@@ -464,7 +556,52 @@ void uploadMesh(Renderer &renderer)
         -renderer.mesh.min.z,
     };
     renderer.target = Vec3{ 0.0F, 0.0F, 80.0F * 0.5F * (size.z / (largest > 0.0F ? largest : 1.0F)) };
-    renderer.distance = 190.0F;
+    renderer.distance = defaultCameraDistance(renderer);
+    renderer.plate_offset = Vec3{};
+}
+
+// Called from the render loop (GL context current) when the mesh file changed on disk: re-reads the
+// STL and re-uploads it so an imported model replaces the previously loaded one.
+void reloadMeshIfChanged(Renderer &renderer)
+{
+    const FileStamp stamp = fileStamp(meshPath());
+    if (! stamp.valid)
+    {
+        return;
+    }
+    if (stamp.seconds == renderer.mesh_stamp.seconds && stamp.nanoseconds == renderer.mesh_stamp.nanoseconds)
+    {
+        return;
+    }
+
+    loadMesh(meshPath(), renderer.mesh);
+    uploadMesh(renderer);
+    renderer.mesh_stamp = stamp;
+    renderer.dirty = true;
+    writeRenderLog("mesh reloaded: vertices=" + std::to_string(renderer.mesh_vertex_count));
+}
+
+// Called from the render loop when the ArkTS side writes a new printer build volume: rebuilds the
+// plate grid and re-frames the camera so a change of printer size is visible in the preview.
+void reloadPlateIfChanged(Renderer &renderer)
+{
+    const FileStamp stamp = fileStamp(plateSizePath());
+    if (! stamp.valid)
+    {
+        return;
+    }
+    if (stamp.seconds == renderer.plate_stamp.seconds && stamp.nanoseconds == renderer.plate_stamp.nanoseconds)
+    {
+        return;
+    }
+
+    readPlateSize(renderer);
+    buildGrid(renderer);
+    // Deliberately does NOT reset the camera distance: keeping the framing lets the plate visibly
+    // grow/shrink on screen instead of zooming out and masking the change.
+    renderer.plate_stamp = stamp;
+    renderer.dirty = true;
+    writeRenderLog("plate resized: " + std::to_string(renderer.plate_width) + " x " + std::to_string(renderer.plate_depth));
 }
 
 void renderFrame(Renderer &renderer)
@@ -488,18 +625,21 @@ void renderFrame(Renderer &renderer)
 
     // Build plate
     glUseProgram(renderer.line_program);
-    glUniformMatrix4fv(glGetUniformLocation(renderer.line_program, "uMvp"), 1, GL_FALSE, (projection * view).m);
-    glUniform4f(glGetUniformLocation(renderer.line_program, "uColor"), 0.28F, 0.30F, 0.34F, 1.0F);
+    glUniformMatrix4fv(renderer.line_mvp_location, 1, GL_FALSE, (projection * view).m);
+    glUniform4f(renderer.line_color_location, 0.28F, 0.30F, 0.34F, 1.0F);
     glBindVertexArray(renderer.grid_vao);
     glDrawArrays(GL_LINES, 0, renderer.grid_vertex_count);
 
     // Model
     if (renderer.mesh_vertex_count > 0)
     {
-        const Mat4 model = Mat4::translation(renderer.mesh_offset) * Mat4::scale(renderer.mesh_scale);
+        // Order matters: the mesh is recentred in its OWN units first, then scaled. Applying the
+        // unscaled mesh_offset after the scale would offset imported models (whose coordinates can
+        // be large) far off the plate and make them impossible to bring back to the centre.
+        const Mat4 model = Mat4::translation(renderer.plate_offset) * Mat4::scale(renderer.mesh_scale) * Mat4::translation(renderer.mesh_offset);
         glUseProgram(renderer.mesh_program);
-        glUniformMatrix4fv(glGetUniformLocation(renderer.mesh_program, "uMvp"), 1, GL_FALSE, (projection * view * model).m);
-        glUniform4f(glGetUniformLocation(renderer.mesh_program, "uColor"), 0.36F, 0.62F, 0.86F, 1.0F);
+        glUniformMatrix4fv(renderer.mesh_mvp_location, 1, GL_FALSE, (projection * view * model).m);
+        glUniform4f(renderer.mesh_color_location, 0.36F, 0.62F, 0.86F, 1.0F);
         glBindVertexArray(renderer.mesh_vao);
         glDrawArrays(GL_TRIANGLES, 0, renderer.mesh_vertex_count);
     }
@@ -524,24 +664,44 @@ void renderLoop()
     bool first_frame = true;
     while (renderer.running.load())
     {
+        std::unique_lock<std::mutex> lock(renderer.mutex);
+        // Redraw only when something changed; the timeout still lets the loop notice a mesh file
+        // written by the ArkTS side, so a static scene costs no GPU work instead of a 60 Hz loop.
+        renderer.wake.wait_for(lock, std::chrono::milliseconds(RELOAD_POLL_MS), [&renderer] {
+            return renderer.dirty || ! renderer.running.load();
+        });
+        if (! renderer.running.load())
         {
-            std::lock_guard<std::mutex> lock(renderer.mutex);
-            if (renderer.display != EGL_NO_DISPLAY && renderer.surface != EGL_NO_SURFACE)
-            {
-                renderFrame(renderer);
-                if (first_frame)
-                {
-                    writeRenderLog("first frame drawn, viewport=" + std::to_string(renderer.surface_width) + "x" + std::to_string(renderer.surface_height));
-                    first_frame = false;
-                }
-            }
+            break;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        if (renderer.display == EGL_NO_DISPLAY || renderer.surface == EGL_NO_SURFACE)
+        {
+            continue;
+        }
+
+        reloadPlateIfChanged(renderer);
+        reloadMeshIfChanged(renderer);
+        if (! renderer.dirty)
+        {
+            continue;
+        }
+
+        renderFrame(renderer);
+        renderer.dirty = false;
+        if (first_frame)
+        {
+            writeRenderLog("first frame drawn, viewport=" + std::to_string(renderer.surface_width) + "x" + std::to_string(renderer.surface_height));
+            first_frame = false;
+        }
     }
 }
 
+void destroyEgl(Renderer &renderer);
+
 bool initEgl(Renderer &renderer, void *window)
 {
+    // Make init idempotent: a re-created surface must not leak the previous EGL objects.
+    destroyEgl(renderer);
     renderer.display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (renderer.display == EGL_NO_DISPLAY)
     {
@@ -601,10 +761,19 @@ bool initEgl(Renderer &renderer, void *window)
 
     renderer.mesh_program = createProgram(MESH_VERTEX_SHADER, MESH_FRAGMENT_SHADER);
     renderer.line_program = createProgram(LINE_VERTEX_SHADER, LINE_FRAGMENT_SHADER);
+    // Resolve the uniforms once instead of every frame.
+    renderer.mesh_mvp_location = glGetUniformLocation(renderer.mesh_program, "uMvp");
+    renderer.mesh_color_location = glGetUniformLocation(renderer.mesh_program, "uColor");
+    renderer.line_mvp_location = glGetUniformLocation(renderer.line_program, "uMvp");
+    renderer.line_color_location = glGetUniformLocation(renderer.line_program, "uColor");
 
+    readPlateSize(renderer);
     loadMesh(meshPath(), renderer.mesh);
     buildGrid(renderer);
     uploadMesh(renderer);
+    renderer.mesh_stamp = fileStamp(meshPath());
+    renderer.plate_stamp = fileStamp(plateSizePath());
+    renderer.dirty = true;
     writeRenderLog("prepared: mesh vertices=" + std::to_string(renderer.mesh_vertex_count) + " grid vertices=" + std::to_string(renderer.grid_vertex_count));
 
     // The EGL context was created on the callback (UI) thread but is used by the render thread.
@@ -641,6 +810,16 @@ void OnSurfaceCreated(OH_NativeXComponent *component, void *window)
 {
     writeRenderLog("surface created");
     Renderer &renderer = g_renderer;
+
+    // A re-created surface can arrive while the previous render thread is still alive. Stop it
+    // first: assigning over a joinable std::thread would call std::terminate and kill the app.
+    renderer.running.store(false);
+    renderer.wake.notify_all();
+    if (renderer.thread.joinable())
+    {
+        renderer.thread.join();
+    }
+
     {
         std::lock_guard<std::mutex> lock(renderer.mutex);
         // The initial layout size may not arrive through OnSurfaceChanged, so seed it here; otherwise
@@ -657,6 +836,7 @@ void OnSurfaceCreated(OH_NativeXComponent *component, void *window)
             writeRenderLog("initEgl failed");
             return;
         }
+        renderer.dirty = true;
     }
     writeRenderLog("egl ready, starting render thread");
     renderer.running.store(true);
@@ -673,6 +853,8 @@ void OnSurfaceChanged(OH_NativeXComponent *component, void *window)
     std::lock_guard<std::mutex> lock(renderer.mutex);
     renderer.surface_width = static_cast<int>(width);
     renderer.surface_height = static_cast<int>(height);
+    renderer.dirty = true;
+    renderer.wake.notify_one();
 }
 
 void OnSurfaceDestroyed(OH_NativeXComponent *component, void *window)
@@ -682,12 +864,62 @@ void OnSurfaceDestroyed(OH_NativeXComponent *component, void *window)
     OH_LOG_INFO(LOG_APP, "%{public}s: surface destroyed", LOG_TAG);
     Renderer &renderer = g_renderer;
     renderer.running.store(false);
+    renderer.wake.notify_all();
     if (renderer.thread.joinable())
     {
         renderer.thread.join();
     }
     std::lock_guard<std::mutex> lock(renderer.mutex);
     destroyEgl(renderer);
+}
+
+// Drags the model across the build plate. Screen pixels are converted to millimetres at the pivot
+// distance and mapped through the camera's screen axes projected onto the Z = 0 plate, so the model
+// follows the drag direction.
+void moveModelOnPlate(Renderer &renderer, const float screen_dx, const float screen_dy)
+{
+    const float fov_y = 0.9F;
+    const float world_per_pixel = renderer.surface_height > 0
+        ? (2.0F * renderer.distance * std::tan(fov_y * 0.5F)) / static_cast<float>(renderer.surface_height)
+        : 0.0F;
+
+    const float yaw = renderer.yaw_degrees * 3.14159265F / 180.0F;
+    const float pitch = renderer.pitch_degrees * 3.14159265F / 180.0F;
+    const Vec3 eye{
+        renderer.target.x + renderer.distance * std::cos(pitch) * std::sin(yaw),
+        renderer.target.y + renderer.distance * std::cos(pitch) * std::cos(yaw),
+        renderer.target.z + renderer.distance * std::sin(pitch),
+    };
+    const Vec3 forward = normalize(renderer.target - eye);
+    const Vec3 right = normalize(cross(forward, Vec3{ 0.0F, 0.0F, 1.0F }));
+    const Vec3 up = cross(right, forward);
+
+    const Vec3 right_plate = normalize(Vec3{ right.x, right.y, 0.0F });
+    const Vec3 up_plate = normalize(Vec3{ up.x, up.y, 0.0F });
+    const Vec3 move = right_plate * (screen_dx * world_per_pixel) + up_plate * (-screen_dy * world_per_pixel);
+
+    // Keep the model within the configured build plate.
+    const float limit_x = renderer.plate_width * 0.5F;
+    const float limit_y = renderer.plate_depth * 0.5F;
+    renderer.plate_offset.x = std::fmax(-limit_x, std::fmin(limit_x, renderer.plate_offset.x + move.x));
+    renderer.plate_offset.y = std::fmax(-limit_y, std::fmin(limit_y, renderer.plate_offset.y + move.y));
+    renderer.plate_offset.z = 0.0F;
+}
+
+// The move/orbit toggle lives in the ArkTS layer, which cannot call into this library directly (the
+// XComponent loads it), so the choice is exchanged through a tiny sandbox file. It is read once per
+// gesture, when the pointer goes down.
+bool readTranslateMode()
+{
+    FILE *file = std::fopen(viewModePath().c_str(), "rb");
+    if (file == nullptr)
+    {
+        return false;
+    }
+    char buffer[16] = {};
+    const size_t read = std::fread(buffer, 1, sizeof(buffer) - 1, file);
+    std::fclose(file);
+    return read > 0 && std::strncmp(buffer, "translate", 9) == 0;
 }
 
 void DispatchTouchEvent(OH_NativeXComponent *component, void *window)
@@ -708,20 +940,41 @@ void DispatchTouchEvent(OH_NativeXComponent *component, void *window)
         return;
     }
 
+    // Any interaction changes the camera or the model position, so the next frame must be redrawn.
+    // The render thread is parked on the condition variable: marking dirty alone is not enough, it
+    // must be woken or the redraw waits for the 300 ms poll timeout (which looks like lag).
+    renderer.dirty = true;
+    renderer.wake.notify_one();
+
+    if (touch_event.type == OH_NativeXComponent_TouchEventType::OH_NATIVEXCOMPONENT_DOWN)
+    {
+        renderer.translate_mode = readTranslateMode();
+    }
+
     const float x = touch_event.x;
     const float y = touch_event.y;
 
     if (touch_event.numPoints >= 2)
     {
-        const float dx = touch_event.touchPoints[0].x - touch_event.touchPoints[1].x;
-        const float dy = touch_event.touchPoints[0].y - touch_event.touchPoints[1].y;
+        const float x0 = touch_event.touchPoints[0].x;
+        const float y0 = touch_event.touchPoints[0].y;
+        const float x1 = touch_event.touchPoints[1].x;
+        const float y1 = touch_event.touchPoints[1].y;
+        const float dx = x0 - x1;
+        const float dy = y0 - y1;
         const float pinch = std::sqrt(dx * dx + dy * dy);
+        const float center_x = (x0 + x1) * 0.5F;
+        const float center_y = (y0 + y1) * 0.5F;
         if (renderer.last_pinch_distance > 0.0F && pinch > 0.0F)
         {
             const float ratio = renderer.last_pinch_distance / pinch;
             renderer.distance = std::fmax(40.0F, std::fmin(900.0F, renderer.distance * ratio));
+            // Two-finger drag (centroid movement) slides the model across the build plate.
+            moveModelOnPlate(renderer, center_x - renderer.last_center_x, center_y - renderer.last_center_y);
         }
         renderer.last_pinch_distance = pinch;
+        renderer.last_center_x = center_x;
+        renderer.last_center_y = center_y;
         renderer.last_touch_x = x;
         renderer.last_touch_y = y;
         return;
@@ -733,8 +986,15 @@ void DispatchTouchEvent(OH_NativeXComponent *component, void *window)
     {
         const float delta_x = x - renderer.last_touch_x;
         const float delta_y = y - renderer.last_touch_y;
-        renderer.yaw_degrees -= delta_x * 0.18F;
-        renderer.pitch_degrees = std::fmax(-85.0F, std::fmin(85.0F, renderer.pitch_degrees + delta_y * 0.18F));
+        if (renderer.translate_mode)
+        {
+            moveModelOnPlate(renderer, delta_x, delta_y);
+        }
+        else
+        {
+            renderer.yaw_degrees -= delta_x * 0.18F;
+            renderer.pitch_degrees = std::fmax(-85.0F, std::fmin(85.0F, renderer.pitch_degrees + delta_y * 0.18F));
+        }
     }
 
     renderer.last_touch_x = x;

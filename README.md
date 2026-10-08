@@ -164,3 +164,18 @@ CuraEngine 依赖 `scripta`、`cura-formulae-engine`、`zeus_expected`，它们�
 - 引擎日志镜像到沙箱 `curaengine.log`，渲染日志写入 `render.log`；失败时会读取尾部显示。
 - 崩溃排查：`devecocli log --crash --bundle-name com.example.curaharmony`
 - 应用内状态栏显示引擎版本，便于确认原生库是否加载成功。
+
+## 许可与合规
+
+本工程链接并分发 **UltiMaker Cura / CuraEngine（AGPL-3.0）**，因此整体以 **AGPL-3.0** 授权，
+许可证全文见仓库根 `LICENSE`。
+
+对外分发（包括上架应用市场）时，依据 AGPL-3.0 第 6 节须提供**对应源码（Corresponding Source）**：
+
+- 本工程源码：本仓库全部内容；
+- 上游源码与版本、本工程的补丁与交叉编译脚本：见 `THIRD_PARTY_NOTICES.md` 与
+  `tools/patches/DEPENDENCIES.md`；
+- 应用内「关于」页面展示了源码获取地址（`entry/src/main/ets/model/AppInfo.ets` 的 `SOURCE_URL`）。
+
+另请留意：“Cura”为 Ultimaker 的商标，对外发布前请确认名称与商标使用是否符合要求。
+

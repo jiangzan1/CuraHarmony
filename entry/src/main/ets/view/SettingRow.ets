@@ -36,7 +36,7 @@ export struct SettingRow {
         .onChange((value: string) => {
           const parsed: number = Number.parseFloat(value);
           if (!Number.isNaN(parsed) && parsed >= 0) {
-            this.setting.value = parsed;
+            this.setting.setValue(parsed);
           }
         })
 

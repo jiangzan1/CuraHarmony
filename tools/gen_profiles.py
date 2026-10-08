@@ -26,12 +26,12 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 CURA_DEFINITIONS = REPO_ROOT / "third_party" / "Cura" / "resources" / "definitions"
 OUTPUT = REPO_ROOT / "entry" / "src" / "main" / "resources" / "rawfile" / "profiles" / "default.json"
 
-# A small, self-consistent machine used for the first end-to-end slice.
+# Kingroon KP3S: 180 x 180 x 180 mm build volume, Marlin flavour.
 OVERRIDES = {
     "machine_extruder_count": 1,
-    "machine_width": 200,
-    "machine_depth": 200,
-    "machine_height": 200,
+    "machine_width": 180,
+    "machine_depth": 180,
+    "machine_height": 180,
     "machine_heated_bed": True,
     "machine_center_is_zero": False,
     "machine_nozzle_size": 0.4,
@@ -46,8 +46,29 @@ OVERRIDES = {
     "speed_travel": 120,
     "retraction_enable": True,
     "support_enable": False,
-    "machine_start_gcode": "G28 ; home\nG1 Z15.0 F6000\nG92 E0\nG1 F200 E10\nG92 E0\n",
-    "machine_end_gcode": "M104 S0\nM140 S0\nG91\nG1 E-2 F2700\nG1 Z1 F6000\nG90\nM84\n",
+    "machine_start_gcode": (
+        "G28 ; home all axes\n"
+        "M117 Purge extruder\n"
+        "G92 E0 ; reset extruder\n"
+        "G1 Z1.0 F3000 ; move z up little to prevent scratching of surface\n"
+        "G1 X2 Y20 Z0.3 F5000.0 ; move to start-line position\n"
+        "G1 X2 Y175.0 Z0.3 F1500.0 E15 ; draw 1st line\n"
+        "G1 X2 Y175.0 Z0.4 F5000.0 ; move to side a little\n"
+        "G1 X2 Y20 Z0.4 F1500.0 E30 ; draw 2nd line\n"
+        "G92 E0 ; reset extruder\n"
+        "G1 Z1.0 F3000 ; move z up little to prevent scratching of surface\n"
+    ),
+    "machine_end_gcode": (
+        "G91; relative positioning\n"
+        "G1 Z1.0 F3000 ; move z up little to prevent scratching of print\n"
+        "G90; absolute positioning\n"
+        "G1 X0 Y200 F1000 ; prepare for part removal\n"
+        "M104 S0; turn off extruder\n"
+        "M140 S0 ; turn off bed\n"
+        "G1 X0 Y300 F1000 ; prepare for part removal\n"
+        "M84 ; disable motors\n"
+        "M106 S0 ; turn off fan\n"
+    ),
 }
 
 

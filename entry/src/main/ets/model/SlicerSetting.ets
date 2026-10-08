@@ -8,13 +8,17 @@ export class SlicerSetting {
   group: string;
   value: number;
   isInteger: boolean;
+  step: number;
+  //! Notifies the owner so derived side effects (for example the preview build plate) can refresh.
+  onChanged?: () => void;
 
-  constructor(key: string, label: string, group: string, value: number, isInteger: boolean) {
+  constructor(key: string, label: string, group: string, value: number, isInteger: boolean, step?: number) {
     this.key = key;
     this.label = label;
     this.group = group;
     this.value = value;
     this.isInteger = isInteger;
+    this.step = step !== undefined ? step : (isInteger ? 1 : 0.05);
   }
 
   // CuraEngine's command line parser expects plain numbers; integers must not gain a decimal point
@@ -24,10 +28,13 @@ export class SlicerSetting {
     return `${this.key}=${text}`;
   }
 
-  adjust(delta: number): void {
-    const step: number = this.isInteger ? 1 : 0.05;
-    const next: number = this.value + delta * step;
+  setValue(next: number): void {
     this.value = next < 0 ? 0 : Math.round(next * 1000) / 1000;
+    this.onChanged?.();
+  }
+
+  adjust(delta: number): void {
+    this.setValue(this.value + delta * this.step);
   }
 }
 
@@ -43,8 +50,8 @@ export function createDefaultSettings(): SlicerSetting[] {
     new SlicerSetting('material_bed_temperature', '热床温度', '材料', 60, true),
     new SlicerSetting('speed_print', '打印速度', '速度', 50, true),
     new SlicerSetting('speed_travel', '空驶速度', '速度', 120, true),
-    new SlicerSetting('machine_width', '成型尺寸 X', '机器', 200, true),
-    new SlicerSetting('machine_depth', '成型尺寸 Y', '机器', 200, true),
-    new SlicerSetting('machine_height', '成型高度 Z', '机器', 200, true),
+    new SlicerSetting('machine_width', '打印宽度', '机器', 180, true, 10),
+    new SlicerSetting('machine_depth', '打印深度', '机器', 180, true, 10),
+    new SlicerSetting('machine_height', '打印高度', '机器', 180, true, 10),
   ];
 }

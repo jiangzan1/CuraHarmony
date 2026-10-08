@@ -30,8 +30,16 @@ bool ReadString(napi_env env, napi_value value, std::string &out)
     {
         return false;
     }
-    out.resize(length);
-    return napi_get_value_string_utf8(env, value, out.data(), length + 1, &length) == napi_ok;
+    // The buffer must hold the string plus its terminating NUL, so reserve length + 1 and then
+    // shrink back to the number of bytes actually written.
+    out.resize(length + 1);
+    size_t written = 0;
+    if (napi_get_value_string_utf8(env, value, out.data(), out.size(), &written) != napi_ok)
+    {
+        return false;
+    }
+    out.resize(written);
+    return true;
 }
 
 bool ReadStringArray(napi_env env, napi_value value, std::vector<std::string> &out)
