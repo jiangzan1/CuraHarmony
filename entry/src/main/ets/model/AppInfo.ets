@@ -3,7 +3,7 @@
 
 export const APP_NAME: string = 'CuraHarmony';
 export const APP_VERSION: string = '1.0.0';
-export const SOURCE_URL: string = 'https://gitee.com/your-account/CuraHarmony';
+export const SOURCE_URL: string = 'https://github.com/jiangzan1/CuraHarmony';
 export const PRIVACY_URL: string = 'https://agreement-drcn.hispace.dbankcloud.cn/index.html?lang=zh&agreementId=2056798714009282496';
 
 export const PRIVACY_SUMMARY: string =
