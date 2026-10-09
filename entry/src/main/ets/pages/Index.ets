@@ -2,6 +2,7 @@ import { getEngineInfo, slice } from 'libcuraslicer.so';
 import { fileIo as fs, picker } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { mediaquery } from '@kit.ArkUI';
 import { SlicerSetting, createDefaultSettings } from '../model/SlicerSetting';
 import { APP_NAME, PRIVACY_SUMMARY } from '../model/AppInfo';
 import { SettingsPanel } from '../view/SettingsPanel';
@@ -9,6 +10,8 @@ import { PrinterPanel } from '../view/PrinterPanel';
 import { AboutDialog } from '../view/AboutDialog';
 import { UsbPrinterService } from '../service/UsbPrinterService';
 import { ConsentStore } from '../service/ConsentStore';
+import { Mesh3mf } from '../service/Mesh3mf';
+import { DeviceProfile } from '../model/DeviceProfile';
 
 const DOMAIN = 0x0000;
 
@@ -25,6 +28,17 @@ struct Index {
   @State slicing: boolean = false;
   @State importing: boolean = false;
   @State moveMode: boolean = false;
+  // Responsive layout: phone (small) shows the preview full width with a collapsible bottom panel,
+  // tablet keeps two columns with a narrower sidebar, 2in1 uses the desktop sidebar.
+  @State isSmall: boolean = false;
+  @State isMedium: boolean = false;
+  @State showSidePanel: boolean = false;
+
+  private smallQuery: mediaquery.MediaQueryListener = mediaquery.matchMediaSync('(width<600vp)');
+  private mediumQuery: mediaquery.MediaQueryListener = mediaquery.matchMediaSync('(600vp<=width<840vp)');
+
+  //! What this device is and which features it can use (see DeviceProfile).
+  private device: DeviceProfile = new DeviceProfile();
 
   private consentChecked: boolean = false;
   private aboutController: CustomDialogController = new CustomDialogController({
@@ -38,7 +52,10 @@ struct Index {
   aboutToAppear(): void {
     this.engineInfo = getEngineInfo();
     this.gcodePath = `${getContext(this).filesDir}/cube.gcode`;
-    this.printer.refreshPorts();
+    if (this.device.supportsPrinting) {
+      // Ports are only relevant where USB printing exists.
+      this.printer.refreshPorts();
+    }
     try {
       const context = getContext(this);
       // The native preview reads cube.stl from the sandbox, so seed it before the XComponent
@@ -57,6 +74,21 @@ struct Index {
       };
     });
     this.persistPlateSize();
+    // Responsive breakpoints: <600vp phone, 600..840vp tablet, else desktop.
+    this.smallQuery.on('change', (result: mediaquery.MediaQueryResult): void => {
+      this.isSmall = result.matches;
+    });
+    this.mediumQuery.on('change', (result: mediaquery.MediaQueryResult): void => {
+      this.isMedium = result.matches;
+    });
+    this.isSmall = this.smallQuery.matches;
+    this.isMedium = this.mediumQuery.matches;
+    hilog.info(DOMAIN, 'CuraSlice', 'DEVICE kind=%{public}s serial=%{public}s', this.device.kind, `${this.device.supportsSerial}`);
+  }
+
+  aboutToDisappear(): void {
+    this.smallQuery.off('change');
+    this.mediumQuery.off('change');
   }
 
   // Store compliance: usage requires accepting the privacy policy on first launch.
@@ -180,31 +212,48 @@ struct Index {
       const documentPicker = new picker.DocumentViewPicker(getContext(this));
       const options = new picker.DocumentSelectOptions();
       options.maxSelectNumber = 1;
-      options.fileSuffixFilters = ['.stl'];
+      options.fileSuffixFilters = ['.stl', '.3mf'];
       const uris: string[] = await documentPicker.select(options);
       if (uris.length === 0) {
         return;
       }
-      const source = fs.openSync(uris[0], fs.OpenMode.READ_ONLY);
-      try {
-        const target = fs.openSync(`${this.filesDir()}/cube.stl`, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-        try {
-          fs.copyFileSync(source.fd, target.fd);
-        } finally {
-          fs.closeSync(target);
-        }
-      } finally {
-        fs.closeSync(source);
-      }
       const name: string = uris[0].split('/').pop() ?? 'model.stl';
-      this.modelName = name;
-      this.status = `已导入 ${name}`;
+      const dir: string = this.filesDir();
+      const modelPath: string = `${dir}/cube.stl`;
+
+      if (name.toLowerCase().endsWith('.3mf')) {
+        // 3MF is a zip archive; flatten it to a binary STL that the preview and CuraEngine accept.
+        this.status = '正在解析 3MF…';
+        const zipPath: string = `${dir}/import_tmp.3mf`;
+        this.copyPickedFile(uris[0], zipPath);
+        const triangles: number = await Mesh3mf.convertToStl(zipPath, dir, modelPath);
+        this.modelName = name;
+        this.status = `已导入 ${name}（${triangles} 个三角面）`;
+      } else {
+        this.copyPickedFile(uris[0], modelPath);
+        this.modelName = name;
+        this.status = `已导入 ${name}`;
+      }
     } catch (error) {
       const err = error as BusinessError;
       this.status = `导入失败：${err.message}`;
       hilog.error(DOMAIN, 'CuraSlice', 'IMPORT_FAIL reason=%{public}s', err.message);
     } finally {
       this.importing = false;
+    }
+  }
+
+  private copyPickedFile(uri: string, targetPath: string): void {
+    const source = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+    try {
+      const target = fs.openSync(targetPath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      try {
+        fs.copyFileSync(source.fd, target.fd);
+      } finally {
+        fs.closeSync(target);
+      }
+    } finally {
+      fs.closeSync(source);
     }
   }
 
@@ -246,23 +295,65 @@ struct Index {
     }
   }
 
+  // Sidebar content shared by the desktop/tablet column and the phone bottom sheet.
+  @Builder
+  sidePanel() {
+    Column() {
+      Scroll() {
+        Column({ space: 8 }) {
+          if (this.isSmall) {
+            // The top bar drops the mode toggle on phones, so it lives here instead.
+            Button(this.moveMode ? '模式：移动（拖动模型）' : '模式：旋转（拖动视角）')
+              .fontSize(12)
+              .height(30)
+              .width('100%')
+              .backgroundColor(this.moveMode ? '#2f6fd0' : '#2a2d33')
+              .onClick(() => {
+                this.moveMode = !this.moveMode;
+                this.persistViewMode();
+              })
+          }
+          // USB printing is PC-only; phones and tablets do not show the printer panel at all.
+          if (this.device.supportsPrinting) {
+            PrinterPanel({ printer: this.printer, gcodePath: this.gcodePath })
+            Divider().color('#2a2d33')
+          }
+          SettingsPanel({ settings: this.settings })
+        }
+        .width('100%')
+        .padding(12)
+        .alignItems(HorizontalAlign.Start)
+      }
+      .width('100%')
+      .height('100%')
+      .scrollBar(BarState.Auto)
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor('#161a1f')
+  }
+
   build() {
     Column() {
-      // Top bar
-      Row({ space: 10 }) {
+      // Top bar: compact labels on phones so all actions still fit.
+      Row({ space: this.isSmall ? 6 : 10 }) {
         Text(APP_NAME)
-          .fontSize(18)
+          .fontSize(this.isSmall ? 16 : 18)
           .fontWeight(FontWeight.Bold)
           .fontColor('#ffffff')
-        Text(this.modelName)
-          .fontSize(12)
-          .fontColor('#8b9099')
-          .layoutWeight(1)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Button('导入模型')
-          .fontSize(13)
-          .height(32)
+        if (this.isSmall) {
+          Blank()
+        } else {
+          Text(this.modelName)
+            .fontSize(12)
+            .fontColor('#8b9099')
+            .layoutWeight(1)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        Button(this.isSmall ? '导入' : '导入模型')
+          .fontSize(this.isSmall ? 12 : 13)
+          .height(this.isSmall ? 30 : 32)
           .backgroundColor('#2a2d33')
           .enabled(!this.importing && !this.slicing)
           .onClick(() => {
@@ -270,68 +361,91 @@ struct Index {
           })
         Button(this.slicing ? '切片中…' : '切片')
           .id('sliceButton')
-          .fontSize(13)
-          .height(32)
+          .fontSize(this.isSmall ? 12 : 13)
+          .height(this.isSmall ? 30 : 32)
           .backgroundColor('#2f6fd0')
           .enabled(!this.slicing && !this.importing)
           .onClick(() => {
             this.runSlice();
           })
-        Button(this.moveMode ? '模式：移动' : '模式：旋转')
-          .id('moveModeButton')
-          .fontSize(13)
-          .height(32)
-          .backgroundColor(this.moveMode ? '#2f6fd0' : '#2a2d33')
-          .onClick(() => {
-            this.moveMode = !this.moveMode;
-            this.persistViewMode();
-          })
+        if (this.isSmall) {
+          Button(this.showSidePanel ? '收起' : '面板')
+            .id('panelButton')
+            .fontSize(12)
+            .height(30)
+            .backgroundColor(this.showSidePanel ? '#2f6fd0' : '#2a2d33')
+            .onClick(() => {
+              this.showSidePanel = !this.showSidePanel;
+            })
+        } else {
+          Button(this.moveMode ? '模式：移动' : '模式：旋转')
+            .id('moveModeButton')
+            .fontSize(13)
+            .height(32)
+            .backgroundColor(this.moveMode ? '#2f6fd0' : '#2a2d33')
+            .onClick(() => {
+              this.moveMode = !this.moveMode;
+              this.persistViewMode();
+            })
+        }
         Button('关于')
           .id('aboutButton')
-          .fontSize(13)
-          .height(32)
+          .fontSize(this.isSmall ? 12 : 13)
+          .height(this.isSmall ? 30 : 32)
           .backgroundColor('#2a2d33')
           .onClick(() => {
             this.aboutController.open();
           })
       }
       .width('100%')
-      .height(52)
-      .padding({ left: 14, right: 14 })
+      .height(this.isSmall ? 48 : 52)
+      .padding({ left: this.isSmall ? 8 : 14, right: this.isSmall ? 8 : 14 })
       .backgroundColor('#1b1e23')
 
-      // Main area: settings sidebar + 3D preview
-      Row() {
+      // Main area: desktop/tablet keep a sidebar column, phones show a full-width preview with a
+      // collapsible bottom sheet.
+      if (this.isSmall) {
         Column() {
-          Scroll() {
-            Column({ space: 8 }) {
-              PrinterPanel({ printer: this.printer, gcodePath: this.gcodePath })
-              Divider().color('#2a2d33')
-              SettingsPanel({ settings: this.settings })
-            }
-            .width('100%')
-            .padding(12)
-            .alignItems(HorizontalAlign.Start)
+          Column() {
+            XComponent({ id: 'curaPreview', type: XComponentType.SURFACE, libraryname: 'render' })
+              .width('100%')
+              .height('100%')
           }
           .width('100%')
-          .height('100%')
-          .scrollBar(BarState.Auto)
-        }
-        .width(320)
-        .height('100%')
-        .backgroundColor('#161a1f')
+          .layoutWeight(1)
+          .backgroundColor('#101317')
 
-        Column() {
-          XComponent({ id: 'curaPreview', type: XComponentType.SURFACE, libraryname: 'render' })
+          if (this.showSidePanel) {
+            Column() {
+              this.sidePanel()
+            }
             .width('100%')
-            .height('100%')
+            .height('42%')
+            .border({ width: { top: 1 }, color: '#2a2d33' })
+          }
         }
+        .width('100%')
         .layoutWeight(1)
-        .height('100%')
-        .backgroundColor('#101317')
+      } else {
+        Row() {
+          Column() {
+            this.sidePanel()
+          }
+          .width(this.isMedium ? 300 : 320)
+          .height('100%')
+
+          Column() {
+            XComponent({ id: 'curaPreview', type: XComponentType.SURFACE, libraryname: 'render' })
+              .width('100%')
+              .height('100%')
+          }
+          .layoutWeight(1)
+          .height('100%')
+          .backgroundColor('#101317')
+        }
+        .width('100%')
+        .layoutWeight(1)
       }
-      .width('100%')
-      .layoutWeight(1)
 
       // Bottom status bar
       Row({ space: 10 }) {
@@ -341,7 +455,13 @@ struct Index {
           .layoutWeight(1)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(this.engineInfo)
+        if (!this.isSmall) {
+          Text(this.engineInfo)
+            .fontSize(10)
+            .fontColor('#5d636d')
+            .maxLines(1)
+        }
+        Text(`设备：${this.device.label()}`)
           .fontSize(10)
           .fontColor('#5d636d')
           .maxLines(1)

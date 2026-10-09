@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <string>
 #include <sys/stat.h>
@@ -319,6 +320,57 @@ void loadMesh(const std::string &path, MeshData &mesh)
 }
 
 // ---------------------------------------------------------------------------------------------
+// Indexed drawing
+// ---------------------------------------------------------------------------------------------
+
+// Welds duplicated (position, normal) pairs from the triangle soup into an index buffer. STL stores
+// each triangle standalone, so coplanar facets repeat their vertices; merging them cuts the vertex
+// count (and VBO size) without changing the flat-shaded look, because vertices shared by facets with
+// different normals are deliberately NOT merged.
+bool buildIndexedMesh(const std::vector<float> &vertices, std::vector<float> &welded, std::vector<unsigned int> &indices)
+{
+    const size_t vertex_count = vertices.size() / 6;
+    if (vertex_count == 0)
+    {
+        return false;
+    }
+
+    std::map<std::array<int, 6>, unsigned int> unique;
+    welded.clear();
+    indices.clear();
+    indices.reserve(vertex_count);
+    welded.reserve(vertices.size());
+
+    for (size_t i = 0; i < vertex_count; ++i)
+    {
+        const float *v = vertices.data() + i * 6;
+        const std::array<int, 6> key{
+            static_cast<int>(std::lround(v[0] * 1000.0F)),
+            static_cast<int>(std::lround(v[1] * 1000.0F)),
+            static_cast<int>(std::lround(v[2] * 1000.0F)),
+            static_cast<int>(std::lround(v[3] * 1000.0F)),
+            static_cast<int>(std::lround(v[4] * 1000.0F)),
+            static_cast<int>(std::lround(v[5] * 1000.0F)),
+        };
+        const auto found = unique.find(key);
+        if (found != unique.end())
+        {
+            indices.push_back(found->second);
+        }
+        else
+        {
+            const unsigned int index = static_cast<unsigned int>(welded.size() / 6);
+            unique.emplace(key, index);
+            welded.insert(welded.end(), { v[0], v[1], v[2], v[3], v[4], v[5] });
+            indices.push_back(index);
+        }
+    }
+
+    // Only use the indexed path when welding actually removed a meaningful amount of data.
+    return welded.size() / 6 < vertex_count * 9 / 10;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Renderer
 // ---------------------------------------------------------------------------------------------
 
@@ -412,9 +464,12 @@ struct Renderer
     GLuint line_program = 0;
     GLuint mesh_vao = 0;
     GLuint mesh_vbo = 0;
+    GLuint mesh_ebo = 0;
     GLuint grid_vao = 0;
     GLuint grid_vbo = 0;
     GLsizei mesh_vertex_count = 0;
+    GLsizei mesh_index_count = 0;
+    bool mesh_indexed{ false };
     GLsizei grid_vertex_count = 0;
     GLint mesh_mvp_location = -1;
     GLint mesh_color_location = -1;
@@ -429,6 +484,13 @@ struct Renderer
     float plate_width = 200.0F;
     float plate_depth = 200.0F;
     FileStamp plate_stamp{}; // mtime of the plate-size file last loaded
+
+    // Mesh parsing runs on a worker thread so a large model cannot stall the render loop or the UI.
+    std::thread parse_thread;
+    bool parse_running{ false };
+    bool has_pending{ false };
+    MeshData pending_mesh;
+    FileStamp pending_stamp{};
 
     int surface_width = 1;
     int surface_height = 1;
@@ -526,21 +588,44 @@ void uploadMesh(Renderer &renderer)
         glGenBuffers(1, &renderer.mesh_vbo);
     }
 
+    // Weld duplicated vertices and draw with an index buffer when that saves a meaningful amount of
+    // data; otherwise keep the plain triangle soup.
+    std::vector<float> welded;
+    std::vector<unsigned int> indices;
+    const bool indexed = buildIndexedMesh(renderer.mesh.vertices, welded, indices);
+    const std::vector<float> &vertex_data = indexed ? welded : renderer.mesh.vertices;
+
     glBindVertexArray(renderer.mesh_vao);
     glBindBuffer(GL_ARRAY_BUFFER, renderer.mesh_vbo);
     glBufferData(
         GL_ARRAY_BUFFER,
-        static_cast<GLsizeiptr>(renderer.mesh.vertices.size() * sizeof(float)),
-        renderer.mesh.vertices.data(),
+        static_cast<GLsizeiptr>(vertex_data.size() * sizeof(float)),
+        vertex_data.data(),
         GL_STATIC_DRAW);
     const GLsizei stride = 6 * sizeof(float);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, nullptr);
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(3 * sizeof(float)));
+
+    renderer.mesh_indexed = indexed;
+    if (indexed)
+    {
+        if (renderer.mesh_ebo == 0)
+        {
+            glGenBuffers(1, &renderer.mesh_ebo);
+        }
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, renderer.mesh_ebo);
+        glBufferData(
+            GL_ELEMENT_ARRAY_BUFFER,
+            static_cast<GLsizeiptr>(indices.size() * sizeof(unsigned int)),
+            indices.data(),
+            GL_STATIC_DRAW);
+        renderer.mesh_index_count = static_cast<GLsizei>(indices.size());
+    }
     glBindVertexArray(0);
 
-    renderer.mesh_vertex_count = static_cast<GLsizei>(renderer.mesh.vertices.size() / 6);
+    renderer.mesh_vertex_count = static_cast<GLsizei>(vertex_data.size() / 6);
 
     // Centre the model on the plate, drop it onto z = 0 and normalise its size for a stable camera.
     const Vec3 size{
@@ -560,8 +645,39 @@ void uploadMesh(Renderer &renderer)
     renderer.plate_offset = Vec3{};
 }
 
-// Called from the render loop (GL context current) when the mesh file changed on disk: re-reads the
-// STL and re-uploads it so an imported model replaces the previously loaded one.
+// Starts an off-thread parse of the mesh file. The worker publishes through the renderer's pending
+// slot and never touches GL: only the render thread uploads buffers.
+void startMeshParse(Renderer &renderer, const std::string &path, const FileStamp &stamp)
+{
+    if (renderer.parse_running)
+    {
+        // Already parsing; the poll below will pick up any newer file once this one lands.
+        return;
+    }
+    if (renderer.parse_thread.joinable())
+    {
+        // The previous worker has published and is finishing; it needs no lock to exit.
+        renderer.parse_thread.join();
+    }
+
+    renderer.parse_running = true;
+    renderer.parse_thread = std::thread([&renderer, path, stamp]() {
+        MeshData parsed;
+        loadMesh(path, parsed);
+        {
+            std::lock_guard<std::mutex> lock(renderer.mutex);
+            renderer.pending_mesh = std::move(parsed);
+            renderer.pending_stamp = stamp;
+            renderer.has_pending = true;
+            renderer.parse_running = false;
+            renderer.dirty = true;
+        }
+        renderer.wake.notify_one();
+    });
+}
+
+// Called from the render loop (GL context current) when the mesh file changed on disk: parsing is
+// handed to a worker thread so a large model does not block rendering.
 void reloadMeshIfChanged(Renderer &renderer)
 {
     const FileStamp stamp = fileStamp(meshPath());
@@ -574,11 +690,7 @@ void reloadMeshIfChanged(Renderer &renderer)
         return;
     }
 
-    loadMesh(meshPath(), renderer.mesh);
-    uploadMesh(renderer);
-    renderer.mesh_stamp = stamp;
-    renderer.dirty = true;
-    writeRenderLog("mesh reloaded: vertices=" + std::to_string(renderer.mesh_vertex_count));
+    startMeshParse(renderer, meshPath(), stamp);
 }
 
 // Called from the render loop when the ArkTS side writes a new printer build volume: rebuilds the
@@ -641,7 +753,14 @@ void renderFrame(Renderer &renderer)
         glUniformMatrix4fv(renderer.mesh_mvp_location, 1, GL_FALSE, (projection * view * model).m);
         glUniform4f(renderer.mesh_color_location, 0.36F, 0.62F, 0.86F, 1.0F);
         glBindVertexArray(renderer.mesh_vao);
-        glDrawArrays(GL_TRIANGLES, 0, renderer.mesh_vertex_count);
+        if (renderer.mesh_indexed)
+        {
+            glDrawElements(GL_TRIANGLES, renderer.mesh_index_count, GL_UNSIGNED_INT, nullptr);
+        }
+        else
+        {
+            glDrawArrays(GL_TRIANGLES, 0, renderer.mesh_vertex_count);
+        }
     }
 
     glBindVertexArray(0);
@@ -677,6 +796,19 @@ void renderLoop()
         if (renderer.display == EGL_NO_DISPLAY || renderer.surface == EGL_NO_SURFACE)
         {
             continue;
+        }
+
+        // A worker thread may have finished parsing a new mesh; uploading buffers is render-thread work.
+        if (renderer.has_pending)
+        {
+            renderer.mesh = std::move(renderer.pending_mesh);
+            renderer.mesh_stamp = renderer.pending_stamp;
+            renderer.has_pending = false;
+            uploadMesh(renderer);
+            renderer.dirty = true;
+            writeRenderLog("mesh applied: vertices=" + std::to_string(renderer.mesh_vertex_count)
+                           + " indexed=" + (renderer.mesh_indexed ? "yes" : "no")
+                           + " indices=" + std::to_string(renderer.mesh_index_count));
         }
 
         reloadPlateIfChanged(renderer);
@@ -768,13 +900,14 @@ bool initEgl(Renderer &renderer, void *window)
     renderer.line_color_location = glGetUniformLocation(renderer.line_program, "uColor");
 
     readPlateSize(renderer);
-    loadMesh(meshPath(), renderer.mesh);
     buildGrid(renderer);
-    uploadMesh(renderer);
-    renderer.mesh_stamp = fileStamp(meshPath());
+    // The mesh is parsed on a worker thread; the render loop applies it when ready, so a large model
+    // cannot delay the first frame. Only the plate is drawn until then.
+    startMeshParse(renderer, meshPath(), fileStamp(meshPath()));
+    renderer.distance = defaultCameraDistance(renderer);
     renderer.plate_stamp = fileStamp(plateSizePath());
     renderer.dirty = true;
-    writeRenderLog("prepared: mesh vertices=" + std::to_string(renderer.mesh_vertex_count) + " grid vertices=" + std::to_string(renderer.grid_vertex_count));
+    writeRenderLog("prepared: grid vertices=" + std::to_string(renderer.grid_vertex_count) + ", mesh parsing async");
 
     // The EGL context was created on the callback (UI) thread but is used by the render thread.
     // A context may only be current on one thread at a time, so release it here first.
@@ -818,6 +951,11 @@ void OnSurfaceCreated(OH_NativeXComponent *component, void *window)
     if (renderer.thread.joinable())
     {
         renderer.thread.join();
+    }
+    if (renderer.parse_thread.joinable())
+    {
+        // The worker only touches CPU memory and the pending slot, so it can be reaped here.
+        renderer.parse_thread.join();
     }
 
     {
@@ -868,6 +1006,10 @@ void OnSurfaceDestroyed(OH_NativeXComponent *component, void *window)
     if (renderer.thread.joinable())
     {
         renderer.thread.join();
+    }
+    if (renderer.parse_thread.joinable())
+    {
+        renderer.parse_thread.join();
     }
     std::lock_guard<std::mutex> lock(renderer.mutex);
     destroyEgl(renderer);
