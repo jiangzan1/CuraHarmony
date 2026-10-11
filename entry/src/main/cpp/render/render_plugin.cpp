@@ -15,6 +15,8 @@
 
 #include <napi/native_api.h>
 
+#include <rapidjson/document.h>
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -31,6 +33,7 @@
 #include <vector>
 
 #include "render_math.h"
+#include "csg.h"
 
 namespace
 {
@@ -80,6 +83,33 @@ std::string viewModePath()
 std::string plateSizePath()
 {
     return filesDir() + "/plate_size";
+}
+
+std::string scenePath()
+{
+    return filesDir() + "/scene.json";
+}
+
+std::string sceneStlPath()
+{
+    return filesDir() + "/scene.stl";
+}
+
+// Boolean handshake: ArkTS writes "<op> <indexA> <indexB>" to bool.req, the render thread answers with
+// boolean.stl and a bool.done marker (the ArkTS side cannot call into this library directly).
+std::string booleanRequestPath()
+{
+    return filesDir() + "/bool.req";
+}
+
+std::string booleanDonePath()
+{
+    return filesDir() + "/bool.done";
+}
+
+std::string booleanStlPath()
+{
+    return filesDir() + "/boolean.stl";
 }
 
 // Appends to a sandbox log file (the UI shows its tail) in addition to hilog.
@@ -371,6 +401,111 @@ bool buildIndexedMesh(const std::vector<float> &vertices, std::vector<float> &we
 }
 
 // ---------------------------------------------------------------------------------------------
+// Scene / primitives (modelling MVP)
+// ---------------------------------------------------------------------------------------------
+
+// A scene object: a generated primitive or the imported mesh, placed with a transform. Primitives are
+// built in millimetres with their origin at the centre of the base (z = 0) so "position" reads like a
+// coordinate on the build plate.
+struct SceneObject
+{
+    std::string kind{ "cube" }; // cube | cylinder | sphere | cone | imported | mesh
+    std::string file{};         // sandbox file name for mesh / imported objects
+    float size{ 20.0F };
+    Vec3 position{};
+    Vec3 rotation{};      // degrees, applied Z * Y * X
+    Vec3 scale{ 1.0F, 1.0F, 1.0F };
+
+    GLuint vao{ 0 };
+    GLuint vbo{ 0 };
+    GLsizei vertex_count{ 0 };
+
+    // Object-space bounds, used to frame the camera around the whole scene.
+    Vec3 local_min{};
+    Vec3 local_max{};
+
+    // CPU copy (interleaved position + normal, object space) used to bake the exported STL.
+    std::vector<float> vertices;
+};
+
+// Appends a triangle with a flat normal to the interleaved vertex list.
+void pushTriangle(std::vector<float> &out, const Vec3 &a, const Vec3 &b, const Vec3 &c)
+{
+    const Vec3 normal = normalize(cross(b - a, c - a));
+    const Vec3 corners[3] = { a, b, c };
+    for (const Vec3 &vertex : corners)
+    {
+        out.insert(out.end(), { vertex.x, vertex.y, vertex.z, normal.x, normal.y, normal.z });
+    }
+}
+
+void generatePrimitive(const std::string &kind, const float size, std::vector<float> &out)
+{
+    out.clear();
+    const float half = size * 0.5F;
+
+    if (kind == "cylinder" || kind == "cone")
+    {
+        const int segments = 48;
+        const float radius = half;
+        const bool is_cone = kind == "cone";
+        for (int i = 0; i < segments; ++i)
+        {
+            const float a0 = 2.0F * 3.14159265F * static_cast<float>(i) / static_cast<float>(segments);
+            const float a1 = 2.0F * 3.14159265F * static_cast<float>(i + 1) / static_cast<float>(segments);
+            const Vec3 p0{ radius * std::cos(a0), radius * std::sin(a0), 0.0F };
+            const Vec3 p1{ radius * std::cos(a1), radius * std::sin(a1), 0.0F };
+            const Vec3 top0 = is_cone ? Vec3{ 0.0F, 0.0F, size } : Vec3{ p0.x, p0.y, size };
+            const Vec3 top1 = is_cone ? Vec3{ 0.0F, 0.0F, size } : Vec3{ p1.x, p1.y, size };
+            pushTriangle(out, p0, p1, top1);
+            pushTriangle(out, p0, top1, top0);
+            // Base cap (normal points down).
+            const Vec3 center{ 0.0F, 0.0F, 0.0F };
+            pushTriangle(out, center, p1, p0);
+        }
+        return;
+    }
+
+    if (kind == "sphere")
+    {
+        const int rings = 16;
+        const int sectors = 32;
+        const float radius = half;
+        for (int r = 0; r < rings; ++r)
+        {
+            const float phi0 = 3.14159265F * static_cast<float>(r) / static_cast<float>(rings);
+            const float phi1 = 3.14159265F * static_cast<float>(r + 1) / static_cast<float>(rings);
+            for (int s = 0; s < sectors; ++s)
+            {
+                const float t0 = 2.0F * 3.14159265F * static_cast<float>(s) / static_cast<float>(sectors);
+                const float t1 = 2.0F * 3.14159265F * static_cast<float>(s + 1) / static_cast<float>(sectors);
+                const Vec3 p00{ radius * std::sin(phi0) * std::cos(t0), radius * std::sin(phi0) * std::sin(t0), radius * std::cos(phi0) + radius };
+                const Vec3 p01{ radius * std::sin(phi0) * std::cos(t1), radius * std::sin(phi0) * std::sin(t1), radius * std::cos(phi0) + radius };
+                const Vec3 p10{ radius * std::sin(phi1) * std::cos(t0), radius * std::sin(phi1) * std::sin(t0), radius * std::cos(phi1) + radius };
+                const Vec3 p11{ radius * std::sin(phi1) * std::cos(t1), radius * std::sin(phi1) * std::sin(t1), radius * std::cos(phi1) + radius };
+                pushTriangle(out, p00, p10, p11);
+                pushTriangle(out, p00, p11, p01);
+            }
+        }
+        return;
+    }
+
+    // Default: cube sitting on the plate.
+    const Vec3 c[8] = {
+        { -half, -half, 0.0F }, { half, -half, 0.0F }, { half, half, 0.0F }, { -half, half, 0.0F },
+        { -half, -half, size }, { half, -half, size }, { half, half, size }, { -half, half, size },
+    };
+    const int faces[12][3] = {
+        { 0, 3, 2 }, { 0, 2, 1 }, { 4, 5, 6 }, { 4, 6, 7 }, { 0, 1, 5 }, { 0, 5, 4 },
+        { 1, 2, 6 }, { 1, 6, 5 }, { 2, 3, 7 }, { 2, 7, 6 }, { 3, 0, 4 }, { 3, 4, 7 },
+    };
+    for (const auto &face : faces)
+    {
+        pushTriangle(out, c[face[0]], c[face[1]], c[face[2]]);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Renderer
 // ---------------------------------------------------------------------------------------------
 
@@ -491,6 +626,12 @@ struct Renderer
     bool has_pending{ false };
     MeshData pending_mesh;
     FileStamp pending_stamp{};
+
+    // Modelling scene (scene.json): objects are generated primitives or the imported mesh.
+    std::vector<SceneObject> scene;
+    FileStamp scene_stamp{};
+    bool scene_active{ false };
+    size_t framed_objects{ 0 }; // object count the camera was last framed for
 
     int surface_width = 1;
     int surface_height = 1;
@@ -693,6 +834,409 @@ void reloadMeshIfChanged(Renderer &renderer)
     startMeshParse(renderer, meshPath(), stamp);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Scene objects (modelling MVP)
+// ---------------------------------------------------------------------------------------------
+
+// Object placement: translate * rotateZ * rotateY * rotateX * scale (primitives already have their
+// origin at the centre of the base).
+Mat4 objectMatrix(const SceneObject &object)
+{
+    const float pi = 3.14159265F;
+    return Mat4::translation(object.position)
+           * Mat4::rotationZ(object.rotation.z * pi / 180.0F)
+           * Mat4::rotationY(object.rotation.y * pi / 180.0F)
+           * Mat4::rotationX(object.rotation.x * pi / 180.0F)
+           * Mat4::scale(object.scale);
+}
+
+void uploadSceneObject(SceneObject &object)
+{
+    if (object.vao == 0)
+    {
+        glGenVertexArrays(1, &object.vao);
+    }
+    if (object.vbo == 0)
+    {
+        glGenBuffers(1, &object.vbo);
+    }
+    glBindVertexArray(object.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, object.vbo);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(object.vertices.size() * sizeof(float)), object.vertices.data(), GL_STATIC_DRAW);
+    const GLsizei stride = 6 * sizeof(float);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(3 * sizeof(float)));
+    glBindVertexArray(0);
+    object.vertex_count = static_cast<GLsizei>(object.vertices.size() / 6);
+}
+
+// Primitives are generated; the imported mesh is centred on XY and dropped onto z = 0 so it behaves
+// like the primitives under the object transform.
+void buildSceneObjectGeometry(SceneObject &object, const MeshData &imported)
+{
+    if (object.kind == "imported" || object.kind == "mesh")
+    {
+        MeshData source;
+        if (object.kind == "imported" && imported.loaded)
+        {
+            source = imported;
+        }
+        else
+        {
+            const std::string name = object.file.empty() ? std::string("cube.stl") : object.file;
+            loadMesh(filesDir() + "/" + name, source);
+        }
+        object.vertices = source.vertices;
+        // A boolean result is already authored in plate coordinates, so only the imported mesh is
+        // centred on XY and dropped onto z = 0.
+        if (object.kind == "imported")
+        {
+            const Vec3 offset{
+                -(source.min.x + source.max.x) * 0.5F,
+                -(source.min.y + source.max.y) * 0.5F,
+                -source.min.z,
+            };
+            for (size_t i = 0; i + 5 < object.vertices.size(); i += 6)
+            {
+                object.vertices[i] += offset.x;
+                object.vertices[i + 1] += offset.y;
+                object.vertices[i + 2] += offset.z;
+            }
+        }
+        return;
+    }
+    generatePrimitive(object.kind, object.size, object.vertices);
+}
+
+size_t readSceneFile(Renderer &renderer)
+{
+    for (SceneObject &object : renderer.scene)
+    {
+        if (object.vao != 0)
+        {
+            glDeleteVertexArrays(1, &object.vao);
+        }
+        if (object.vbo != 0)
+        {
+            glDeleteBuffers(1, &object.vbo);
+        }
+    }
+    renderer.scene.clear();
+
+    FILE *file = std::fopen(scenePath().c_str(), "rb");
+    if (file == nullptr)
+    {
+        return 0;
+    }
+    std::string text;
+    std::fseek(file, 0, SEEK_END);
+    const long length = std::ftell(file);
+    std::fseek(file, 0, SEEK_SET);
+    if (length > 0)
+    {
+        text.resize(static_cast<size_t>(length));
+        const size_t read = std::fread(&text[0], 1, text.size(), file);
+        text.resize(read);
+    }
+    std::fclose(file);
+
+    rapidjson::Document document;
+    if (document.Parse(text.c_str()).HasParseError() || ! document.HasMember("objects") || ! document["objects"].IsArray())
+    {
+        writeRenderLog("scene.json invalid, keeping the previous scene");
+        return 0;
+    }
+
+    for (const auto &item : document["objects"].GetArray())
+    {
+        SceneObject object;
+        if (item.HasMember("kind") && item["kind"].IsString())
+        {
+            object.kind = item["kind"].GetString();
+        }
+        if (item.HasMember("size") && item["size"].IsNumber())
+        {
+            object.size = static_cast<float>(item["size"].GetDouble());
+        }
+        if (item.HasMember("file") && item["file"].IsString())
+        {
+            object.file = item["file"].GetString();
+        }
+        if (item.HasMember("position") && item["position"].IsArray() && item["position"].Size() == 3)
+        {
+            object.position = Vec3{
+                static_cast<float>(item["position"][0].GetDouble()),
+                static_cast<float>(item["position"][1].GetDouble()),
+                static_cast<float>(item["position"][2].GetDouble()),
+            };
+        }
+        if (item.HasMember("rotation") && item["rotation"].IsArray() && item["rotation"].Size() == 3)
+        {
+            object.rotation = Vec3{
+                static_cast<float>(item["rotation"][0].GetDouble()),
+                static_cast<float>(item["rotation"][1].GetDouble()),
+                static_cast<float>(item["rotation"][2].GetDouble()),
+            };
+        }
+        if (item.HasMember("scale") && item["scale"].IsArray() && item["scale"].Size() == 3)
+        {
+            object.scale = Vec3{
+                static_cast<float>(item["scale"][0].GetDouble()),
+                static_cast<float>(item["scale"][1].GetDouble()),
+                static_cast<float>(item["scale"][2].GetDouble()),
+            };
+        }
+        buildSceneObjectGeometry(object, renderer.mesh);
+        uploadSceneObject(object);
+        // Local bounds for camera framing.
+        if (! object.vertices.empty())
+        {
+            object.local_min = Vec3{ object.vertices[0], object.vertices[1], object.vertices[2] };
+            object.local_max = object.local_min;
+            for (size_t i = 0; i + 5 < object.vertices.size(); i += 6)
+            {
+                object.local_min.x = std::fmin(object.local_min.x, object.vertices[i]);
+                object.local_min.y = std::fmin(object.local_min.y, object.vertices[i + 1]);
+                object.local_min.z = std::fmin(object.local_min.z, object.vertices[i + 2]);
+                object.local_max.x = std::fmax(object.local_max.x, object.vertices[i]);
+                object.local_max.y = std::fmax(object.local_max.y, object.vertices[i + 1]);
+                object.local_max.z = std::fmax(object.local_max.z, object.vertices[i + 2]);
+            }
+        }
+        renderer.scene.push_back(std::move(object));
+    }
+    renderer.scene_active = ! renderer.scene.empty();
+    return renderer.scene.size();
+}
+
+// Frames the camera around all scene objects. Only called when the object COUNT changes, so moving or
+// scaling an object does not fight the user's own zoom.
+void frameScene(Renderer &renderer)
+{
+    if (renderer.scene.empty())
+    {
+        return;
+    }
+    Vec3 min{};
+    Vec3 max{};
+    bool first = true;
+    for (const SceneObject &object : renderer.scene)
+    {
+        const Mat4 model = objectMatrix(object);
+        const Vec3 corners[8] = {
+            { object.local_min.x, object.local_min.y, object.local_min.z },
+            { object.local_max.x, object.local_min.y, object.local_min.z },
+            { object.local_min.x, object.local_max.y, object.local_min.z },
+            { object.local_max.x, object.local_max.y, object.local_min.z },
+            { object.local_min.x, object.local_min.y, object.local_max.z },
+            { object.local_max.x, object.local_min.y, object.local_max.z },
+            { object.local_min.x, object.local_max.y, object.local_max.z },
+            { object.local_max.x, object.local_max.y, object.local_max.z },
+        };
+        for (const Vec3 &corner : corners)
+        {
+            const Vec3 world = transformPoint(model, corner);
+            if (first)
+            {
+                min = world;
+                max = world;
+                first = false;
+            }
+            min.x = std::fmin(min.x, world.x);
+            min.y = std::fmin(min.y, world.y);
+            min.z = std::fmin(min.z, world.z);
+            max.x = std::fmax(max.x, world.x);
+            max.y = std::fmax(max.y, world.y);
+            max.z = std::fmax(max.z, world.z);
+        }
+    }
+    if (first)
+    {
+        return;
+    }
+
+    const float largest = std::fmax(std::fmax(max.x - min.x, max.y - min.y), max.z - min.z);
+    const float radius = std::fmax(largest * 0.5F, 10.0F);
+    renderer.distance = std::fmin(std::fmax(radius * 3.2F, 70.0F), 600.0F);
+    renderer.target = Vec3{ (min.x + max.x) * 0.5F, (min.y + max.y) * 0.5F, (min.z + max.z) * 0.5F };
+    renderer.dirty = true;
+}
+
+// Bakes every object (with its transform) into one binary STL so the slicer receives exactly what the
+// preview shows.
+void exportSceneToStl(Renderer &renderer)
+{
+    std::vector<float> triangles; // 12 floats per triangle: normal + 3 vertices
+    for (const SceneObject &object : renderer.scene)
+    {
+        const Mat4 model = objectMatrix(object);
+        for (size_t i = 0; i + 17 < object.vertices.size(); i += 18)
+        {
+            Vec3 tri[3];
+            for (int v = 0; v < 3; ++v)
+            {
+                const float *src = object.vertices.data() + i + static_cast<size_t>(v) * 6;
+                tri[v] = transformPoint(model, Vec3{ src[0], src[1], src[2] });
+            }
+            const Vec3 normal = normalize(cross(tri[1] - tri[0], tri[2] - tri[0]));
+            triangles.insert(triangles.end(), {
+                normal.x, normal.y, normal.z,
+                tri[0].x, tri[0].y, tri[0].z,
+                tri[1].x, tri[1].y, tri[1].z,
+                tri[2].x, tri[2].y, tri[2].z,
+            });
+        }
+    }
+
+    const size_t triangle_count = triangles.size() / 12;
+    if (triangle_count == 0)
+    {
+        return;
+    }
+
+    std::vector<unsigned char> buffer(84 + triangle_count * 50, 0);
+    uint32_t count = static_cast<uint32_t>(triangle_count);
+    std::memcpy(buffer.data() + 80, &count, sizeof(count));
+    for (size_t t = 0; t < triangle_count; ++t)
+    {
+        float values[12];
+        std::memcpy(values, triangles.data() + t * 12, sizeof(values));
+        std::memcpy(buffer.data() + 84 + t * 50, values, sizeof(values));
+    }
+
+    FILE *file = std::fopen(sceneStlPath().c_str(), "wb");
+    if (file == nullptr)
+    {
+        writeRenderLog("scene export failed: cannot open scene.stl");
+        return;
+    }
+    std::fwrite(buffer.data(), 1, buffer.size(), file);
+    std::fclose(file);
+    writeRenderLog("scene exported: objects=" + std::to_string(renderer.scene.size())
+                   + " triangles=" + std::to_string(triangle_count));
+}
+
+// Object vertices with the object transform applied (plate / world space).
+std::vector<float> worldVertices(const SceneObject &object)
+{
+    std::vector<float> out;
+    out.reserve(object.vertices.size());
+    const Mat4 model = objectMatrix(object);
+    for (size_t i = 0; i + 5 < object.vertices.size(); i += 6)
+    {
+        const Vec3 p = transformPoint(model, Vec3{ object.vertices[i], object.vertices[i + 1], object.vertices[i + 2] });
+        out.insert(out.end(), { p.x, p.y, p.z, object.vertices[i + 3], object.vertices[i + 4], object.vertices[i + 5] });
+    }
+    return out;
+}
+
+// Serves a pending boolean request from the ArkTS layer: combines two scene objects and publishes the
+// result as boolean.stl plus a bool.done marker (ArkTS polls for the marker).
+void processBooleanRequest(Renderer &renderer)
+{
+    FILE *file = std::fopen(booleanRequestPath().c_str(), "rb");
+    if (file == nullptr)
+    {
+        return;
+    }
+    char buffer[64] = {};
+    const size_t read = std::fread(buffer, 1, sizeof(buffer) - 1, file);
+    std::fclose(file);
+    std::remove(booleanRequestPath().c_str());
+
+    char operation[24] = {};
+    int index_a = -1;
+    int index_b = -1;
+    if (read == 0 || std::sscanf(buffer, "%23s %d %d", operation, &index_a, &index_b) != 3)
+    {
+        return;
+    }
+    if (index_a < 0 || index_b < 0
+        || index_a >= static_cast<int>(renderer.scene.size())
+        || index_b >= static_cast<int>(renderer.scene.size())
+        || index_a == index_b)
+    {
+        writeRenderLog("boolean skipped: invalid object indices");
+        return;
+    }
+
+    csg::Operation op = csg::Operation::Union;
+    if (std::strcmp(operation, "subtract") == 0)
+    {
+        op = csg::Operation::Subtract;
+    }
+    else if (std::strcmp(operation, "intersect") == 0)
+    {
+        op = csg::Operation::Intersect;
+    }
+
+    const std::vector<float> a = worldVertices(renderer.scene[index_a]);
+    const std::vector<float> b = worldVertices(renderer.scene[index_b]);
+    const std::vector<float> result = csg::apply(op, a, b);
+    const size_t triangles = result.size() / 18;
+    if (triangles == 0)
+    {
+        writeRenderLog("boolean produced no geometry");
+        return;
+    }
+
+    std::vector<unsigned char> stl_buffer(84 + triangles * 50, 0);
+    uint32_t count = static_cast<uint32_t>(triangles);
+    std::memcpy(stl_buffer.data() + 80, &count, sizeof(count));
+    for (size_t t = 0; t < triangles; ++t)
+    {
+        float values[12];
+        std::memcpy(values, result.data() + t * 18, sizeof(values));
+        std::memcpy(stl_buffer.data() + 84 + t * 50, values, sizeof(values));
+    }
+
+    FILE *stl = std::fopen(booleanStlPath().c_str(), "wb");
+    if (stl == nullptr)
+    {
+        writeRenderLog("boolean failed: cannot write boolean.stl");
+        return;
+    }
+    std::fwrite(stl_buffer.data(), 1, stl_buffer.size(), stl);
+    std::fclose(stl);
+
+    FILE *done = std::fopen(booleanDonePath().c_str(), "wb");
+    if (done != nullptr)
+    {
+        std::fprintf(done, "ok %zu\n", triangles);
+        std::fclose(done);
+    }
+    writeRenderLog("boolean done: " + std::string(operation) + " triangles=" + std::to_string(triangles));
+}
+
+void reloadSceneIfChanged(Renderer &renderer)
+{
+    const FileStamp stamp = fileStamp(scenePath());
+    if (! stamp.valid)
+    {
+        return;
+    }
+    if (stamp.seconds == renderer.scene_stamp.seconds && stamp.nanoseconds == renderer.scene_stamp.nanoseconds)
+    {
+        return;
+    }
+
+    const size_t objects = readSceneFile(renderer);
+    if (renderer.scene.size() != renderer.framed_objects)
+    {
+        // Adding/removing objects (or importing) re-frames; moving them does not.
+        frameScene(renderer);
+        renderer.framed_objects = renderer.scene.size();
+    }
+    renderer.scene_stamp = stamp;
+    renderer.dirty = true;
+    if (objects > 0)
+    {
+        exportSceneToStl(renderer);
+    }
+}
+
 // Called from the render loop when the ArkTS side writes a new printer build volume: rebuilds the
 // plate grid and re-frames the camera so a change of printer size is visible in the preview.
 void reloadPlateIfChanged(Renderer &renderer)
@@ -724,7 +1268,11 @@ void renderFrame(Renderer &renderer)
     glEnable(GL_DEPTH_TEST);
 
     const float aspect = renderer.surface_height > 0 ? static_cast<float>(renderer.surface_width) / static_cast<float>(renderer.surface_height) : 1.0F;
-    const Mat4 projection = Mat4::perspective(0.9F, aspect, 0.5F, 4000.0F);
+    // Keep the HORIZONTAL field of view constant on narrow windows: portrait phones have aspect < 1,
+    // and a fixed vertical fov would make the model overflow the sides.
+    const float base_fov_y = 0.9F;
+    const float fov_y = aspect < 1.0F ? 2.0F * std::atan(std::tan(base_fov_y * 0.5F) / aspect) : base_fov_y;
+    const Mat4 projection = Mat4::perspective(fov_y, aspect, 0.5F, 4000.0F);
 
     const float yaw = renderer.yaw_degrees * 3.14159265F / 180.0F;
     const float pitch = renderer.pitch_degrees * 3.14159265F / 180.0F;
@@ -742,8 +1290,24 @@ void renderFrame(Renderer &renderer)
     glBindVertexArray(renderer.grid_vao);
     glDrawArrays(GL_LINES, 0, renderer.grid_vertex_count);
 
-    // Model
-    if (renderer.mesh_vertex_count > 0)
+    // Scene objects (modelling) when scene.json is in use, otherwise the single imported mesh.
+    if (renderer.scene_active && ! renderer.scene.empty())
+    {
+        glUseProgram(renderer.mesh_program);
+        for (const SceneObject &object : renderer.scene)
+        {
+            if (object.vertex_count == 0)
+            {
+                continue;
+            }
+            const Mat4 model = objectMatrix(object);
+            glUniformMatrix4fv(renderer.mesh_mvp_location, 1, GL_FALSE, (projection * view * model).m);
+            glUniform4f(renderer.mesh_color_location, 0.36F, 0.62F, 0.86F, 1.0F);
+            glBindVertexArray(object.vao);
+            glDrawArrays(GL_TRIANGLES, 0, object.vertex_count);
+        }
+    }
+    else if (renderer.mesh_vertex_count > 0)
     {
         // Order matters: the mesh is recentred in its OWN units first, then scaled. Applying the
         // unscaled mesh_offset after the scale would offset imported models (whose coordinates can
@@ -805,6 +1369,18 @@ void renderLoop()
             renderer.mesh_stamp = renderer.pending_stamp;
             renderer.has_pending = false;
             uploadMesh(renderer);
+            // The imported geometry changed: rebuild the scene so the "imported" object picks it up
+            // and the exported STL stays in sync with the preview.
+            if (renderer.scene_active)
+            {
+                readSceneFile(renderer);
+                if (renderer.scene.size() != renderer.framed_objects)
+                {
+                    frameScene(renderer);
+                    renderer.framed_objects = renderer.scene.size();
+                }
+                exportSceneToStl(renderer);
+            }
             renderer.dirty = true;
             writeRenderLog("mesh applied: vertices=" + std::to_string(renderer.mesh_vertex_count)
                            + " indexed=" + (renderer.mesh_indexed ? "yes" : "no")
@@ -813,6 +1389,8 @@ void renderLoop()
 
         reloadPlateIfChanged(renderer);
         reloadMeshIfChanged(renderer);
+        reloadSceneIfChanged(renderer);
+        processBooleanRequest(renderer);
         if (! renderer.dirty)
         {
             continue;

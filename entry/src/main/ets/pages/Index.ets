@@ -4,14 +4,16 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { mediaquery } from '@kit.ArkUI';
 import { SlicerSetting, createDefaultSettings } from '../model/SlicerSetting';
-import { APP_NAME, PRIVACY_SUMMARY } from '../model/AppInfo';
+import { APP_NAME } from '../model/AppInfo';
 import { SettingsPanel } from '../view/SettingsPanel';
 import { PrinterPanel } from '../view/PrinterPanel';
 import { AboutDialog } from '../view/AboutDialog';
 import { UsbPrinterService } from '../service/UsbPrinterService';
-import { ConsentStore } from '../service/ConsentStore';
 import { Mesh3mf } from '../service/Mesh3mf';
 import { DeviceProfile } from '../model/DeviceProfile';
+import { SceneObject, SceneStore } from '../model/SceneModel';
+import { ProjectStore } from '../service/ProjectStore';
+import { ModelPanel } from '../view/ModelPanel';
 
 const DOMAIN = 0x0000;
 
@@ -33,6 +35,13 @@ struct Index {
   @State isSmall: boolean = false;
   @State isMedium: boolean = false;
   @State showSidePanel: boolean = false;
+  //! Modelling scene: objects placed on the build plate (see ModelPanel / SceneModel).
+  @State scene: SceneObject[] = [];
+  @State selectedIndex: number = 0;
+  @State sceneVersion: number = 0;
+  //! Undo/redo stacks of scene snapshots (deep copies, so no JSON parsing is needed to restore).
+  private history: SceneObject[][] = [];
+  private redoHistory: SceneObject[][] = [];
 
   private smallQuery: mediaquery.MediaQueryListener = mediaquery.matchMediaSync('(width<600vp)');
   private mediumQuery: mediaquery.MediaQueryListener = mediaquery.matchMediaSync('(600vp<=width<840vp)');
@@ -40,7 +49,6 @@ struct Index {
   //! What this device is and which features it can use (see DeviceProfile).
   private device: DeviceProfile = new DeviceProfile();
 
-  private consentChecked: boolean = false;
   private aboutController: CustomDialogController = new CustomDialogController({
     builder: AboutDialog(),
     autoCancel: true,
@@ -70,7 +78,14 @@ struct Index {
     // Any setting edit may change the machine build volume, which the preview mirrors.
     this.settings.forEach((item: SlicerSetting): void => {
       item.onChanged = (): void => {
-        this.persistPlateSize();
+    this.persistPlateSize();
+    // Default scene: the bundled sample model, so the preview has content before any edit and the
+    // native side can export scene.stl for slicing.
+    if (this.scene.length === 0) {
+      this.scene = [new SceneObject('imported', '示例模型', 0)];
+      this.selectedIndex = 0;
+      this.commitScene();
+    }
       };
     });
     this.persistPlateSize();
@@ -91,50 +106,163 @@ struct Index {
     this.mediumQuery.off('change');
   }
 
-  // Store compliance: usage requires accepting the privacy policy on first launch.
-  onPageShow(): void {
-    if (this.consentChecked) {
-      return;
-    }
-    this.consentChecked = true;
-    if (!ConsentStore.isPrivacyAgreed(this.filesDir())) {
-      this.showPrivacyConsent();
-    }
-  }
-
-  private showPrivacyConsent(): void {
-    AlertDialog.show({
-      title: '隐私政策',
-      message: PRIVACY_SUMMARY,
-      autoCancel: false,
-      primaryButton: {
-        value: '不同意并退出',
-        action: (): void => {
-          this.exitApp();
-        }
-      },
-      secondaryButton: {
-        value: '同意',
-        action: (): void => {
-          ConsentStore.agreePrivacy(this.filesDir());
-        }
-      }
-    });
-  }
-
-  private exitApp(): void {
-    try {
-      getContext(this).getApplicationContext().killAllProcesses().catch((error: BusinessError) => {
-        hilog.error(DOMAIN, 'CuraSlice', 'EXIT_FAIL reason=%{public}s', error.message);
-      });
-    } catch (error) {
-      const err = error as BusinessError;
-      hilog.error(DOMAIN, 'CuraSlice', 'EXIT_FAIL reason=%{public}s', err.message);
-    }
-  }
+  // Privacy is handled by the platform's hosted privacy statement (AGC 隐私托管). The app must NOT
+  // show its own consent dialog, otherwise the first launch pops two privacy dialogs and review
+  // rejects it. The hosted policy is linked from the "关于" dialog instead.
 
   private filesDir(): string {
     return getContext(this).filesDir;
+  }
+
+  // Writes the scene for the native renderer without touching the undo history.
+  private writeScene(): void {
+    SceneStore.persist(this.filesDir(), this.scene);
+    this.sceneVersion++;
+  }
+
+  // Every user-visible edit goes through here so it can be undone.
+  private commitScene(): void {
+    this.writeScene();
+    this.history.push(this.snapshot());
+    if (this.history.length > 50) {
+      this.history.shift();
+    }
+    this.redoHistory = [];
+  }
+
+  private snapshot(): SceneObject[] {
+    return this.scene.map((item: SceneObject): SceneObject => item.clone());
+  }
+
+  private undo(): void {
+    if (this.history.length < 2) {
+      this.status = '没有可撤销的操作';
+      return;
+    }
+    const current: SceneObject[] = this.history[this.history.length - 1];
+    this.history.pop();
+    this.redoHistory.push(current);
+    this.scene = this.history[this.history.length - 1];
+    this.selectedIndex = this.scene.length > 0 ? Math.min(this.selectedIndex, this.scene.length - 1) : -1;
+    this.writeScene();
+    this.status = '已撤销';
+  }
+
+  private redo(): void {
+    if (this.redoHistory.length === 0) {
+      this.status = '没有可重做的操作';
+      return;
+    }
+    const next: SceneObject[] = this.redoHistory[this.redoHistory.length - 1];
+    this.redoHistory.pop();
+    this.history.push(next);
+    this.scene = next;
+    this.selectedIndex = this.scene.length > 0 ? this.scene.length - 1 : -1;
+    this.writeScene();
+    this.status = '已重做';
+  }
+
+  private async saveProject(): Promise<void> {
+    const uri: string = await ProjectStore.saveText(getContext(this), 'SliceForge.sfproj', ProjectStore.serialize(this.scene));
+    this.status = uri === '' ? '已取消保存' : '工程已保存';
+  }
+
+  private async openProject(): Promise<void> {
+    const path: string = await ProjectStore.pickToSandbox(getContext(this), this.filesDir());
+    if (path === '') {
+      this.status = '已取消打开';
+      return;
+    }
+    const opened: SceneObject[] = ProjectStore.parse(ProjectStore.readText(path));
+    if (opened.length === 0) {
+      this.status = '工程文件为空或格式不支持';
+      return;
+    }
+    this.scene = opened;
+    this.selectedIndex = 0;
+    this.commitScene();
+    this.status = `已打开工程（${opened.length} 个对象）`;
+  }
+
+  private async exportStl(): Promise<void> {
+    const scenePath: string = `${this.filesDir()}/scene.stl`;
+    if (!fs.accessSync(scenePath)) {
+      this.status = '还没有可导出的网格';
+      return;
+    }
+    const uri: string = await ProjectStore.saveFile(getContext(this), 'SliceForge.stl', scenePath);
+    this.status = uri === '' ? '已取消导出' : '已导出 STL';
+  }
+
+  private async export3mf(): Promise<void> {
+    const scenePath: string = `${this.filesDir()}/scene.stl`;
+    if (!fs.accessSync(scenePath)) {
+      this.status = '还没有可导出的网格';
+      return;
+    }
+    this.status = '正在导出 3MF…';
+    const zipPath: string = await ProjectStore.export3mf(this.filesDir(), scenePath);
+    if (zipPath === '') {
+      this.status = '导出 3MF 失败';
+      return;
+    }
+    const uri: string = await ProjectStore.saveFile(getContext(this), 'SliceForge.3mf', zipPath);
+    this.status = uri === '' ? '已取消导出' : '已导出 3MF';
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise<void>((resolve: () => void): void => {
+      setTimeout(resolve, ms);
+    });
+  }
+
+  // Boolean runs in the native renderer (no direct call is possible): write bool.req, then poll for
+  // bool.done. A = the object above the selected one, B = the selected object.
+  private async runBoolean(operation: string): Promise<void> {
+    if (this.scene.length < 2 || this.selectedIndex <= 0) {
+      this.status = '布尔运算：请选中第二个对象（结果 = 上一个与选中的对象）';
+      return;
+    }
+    const indexB: number = this.selectedIndex;
+    const indexA: number = indexB - 1;
+    const dir: string = this.filesDir();
+    const donePath: string = `${dir}/bool.done`;
+    try {
+      fs.unlinkSync(donePath);
+    } catch (error) {
+      // No previous result: nothing to remove.
+    }
+    try {
+      const request = fs.openSync(`${dir}/bool.req`, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(request.fd, `${operation} ${indexA} ${indexB}`);
+      } finally {
+        fs.closeSync(request);
+      }
+    } catch (error) {
+      const err = error as BusinessError;
+      this.status = `布尔请求失败：${err.message}`;
+      return;
+    }
+
+    this.status = '布尔运算中…';
+    const deadline: number = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      await this.sleep(200);
+      if (fs.accessSync(donePath)) {
+        const label: string = operation === 'union' ? '并集' : (operation === 'subtract' ? '差集' : '交集');
+        const result = new SceneObject('mesh', label, 0);
+        result.file = 'boolean.stl';
+        this.scene.splice(indexA, 2);
+        this.scene.push(result);
+        this.selectedIndex = this.scene.length - 1;
+        this.commitScene();
+        this.status = `布尔${label}完成`;
+        hilog.info(DOMAIN, 'CuraSlice', 'BOOLEAN_OK op=%{public}s', operation);
+        return;
+      }
+    }
+    this.status = '布尔运算超时（请重试）';
   }
 
   // The native preview cannot be called from ArkTS (the XComponent loads it), so the drag mode is
@@ -212,19 +340,26 @@ struct Index {
       const documentPicker = new picker.DocumentViewPicker(getContext(this));
       const options = new picker.DocumentSelectOptions();
       options.maxSelectNumber = 1;
-      options.fileSuffixFilters = ['.stl', '.3mf'];
+      // No fileSuffixFilters: the system picker only honours ONE custom suffix, so listing both hid
+      // every .stl file once 3MF support was added. The extension is validated below instead.
       const uris: string[] = await documentPicker.select(options);
       if (uris.length === 0) {
         return;
       }
       const name: string = uris[0].split('/').pop() ?? 'model.stl';
+      const lowerName: string = name.toLowerCase();
+      if (!lowerName.endsWith('.stl') && !lowerName.endsWith('.3mf')) {
+        this.status = '请选择 STL 或 3MF 文件';
+        return;
+      }
       const dir: string = this.filesDir();
       const modelPath: string = `${dir}/cube.stl`;
 
-      if (name.toLowerCase().endsWith('.3mf')) {
+      if (lowerName.endsWith('.3mf')) {
         // 3MF is a zip archive; flatten it to a binary STL that the preview and CuraEngine accept.
+        // zlib.decompressFile requires the source extension to be .zip, hence the .zip temp name.
         this.status = '正在解析 3MF…';
-        const zipPath: string = `${dir}/import_tmp.3mf`;
+        const zipPath: string = `${dir}/import_tmp.zip`;
         this.copyPickedFile(uris[0], zipPath);
         const triangles: number = await Mesh3mf.convertToStl(zipPath, dir, modelPath);
         this.modelName = name;
@@ -234,6 +369,11 @@ struct Index {
         this.modelName = name;
         this.status = `已导入 ${name}`;
       }
+      // The imported geometry becomes the whole scene; the native side re-parses cube.stl and
+      // re-exports scene.stl from it.
+      this.scene = [new SceneObject('imported', name, 0)];
+      this.selectedIndex = 0;
+      this.commitScene();
     } catch (error) {
       const err = error as BusinessError;
       this.status = `导入失败：${err.message}`;
@@ -266,7 +406,10 @@ struct Index {
     try {
       const dir: string = this.filesDir();
       const settingsPath: string = `${dir}/default.json`;
-      const modelPath: string = `${dir}/cube.stl`;
+      // The native renderer exports the modelling scene to scene.stl; fall back to the raw import when
+      // that export has not happened yet.
+      const scenePath: string = `${dir}/scene.stl`;
+      const modelPath: string = fs.accessSync(scenePath) ? scenePath : `${dir}/cube.stl`;
       const outputPath: string = `${dir}/cube.gcode`;
 
       this.materialiseRawFile('profiles/default.json', settingsPath);
@@ -318,6 +461,36 @@ struct Index {
             PrinterPanel({ printer: this.printer, gcodePath: this.gcodePath })
             Divider().color('#2a2d33')
           }
+          ModelPanel({
+            scene: this.scene,
+            selectedIndex: this.selectedIndex,
+            version: this.sceneVersion,
+            onSceneChanged: () => {
+              this.commitScene();
+            },
+            onBoolean: (operation: string) => {
+              this.runBoolean(operation);
+            },
+            onUndo: () => {
+              this.undo();
+            },
+            onRedo: () => {
+              this.redo();
+            },
+            onSaveProject: () => {
+              this.saveProject();
+            },
+            onOpenProject: () => {
+              this.openProject();
+            },
+            onExportStl: () => {
+              this.exportStl();
+            },
+            onExport3mf: () => {
+              this.export3mf();
+            }
+          })
+          Divider().color('#2a2d33')
           SettingsPanel({ settings: this.settings })
         }
         .width('100%')

@@ -1,4 +1,4 @@
-# CuraHarmony
+# SliceForge
 
 把 [UltiMaker Cura](https://github.com/Ultimaker/Cura) 的切片能力移植到 **HarmonyOS（鸿蒙）**：
 用 ArkTS/ArkUI 重建 Cura 风格界面，用 **XComponent + OpenGL ES 3.0** 做 3D 预览，把 C++ 的
@@ -54,7 +54,7 @@ ArkTS/ArkUI 表现层
 ## 目录结构
 
 ```
-CuraHarmony/
+SliceForge/
 ├── AppScope/                        应用级配置
 ├── entry/
 │   ├── build-profile.json5          externalNativeOptions（CMake 路径 + abiFilters）
@@ -162,7 +162,7 @@ CuraEngine 依赖 `scripta`、`cura-formulae-engine`、`zeus_expected`，它们�
 ## 日志与诊断
 
 - 引擎日志镜像到沙箱 `curaengine.log`，渲染日志写入 `render.log`；失败时会读取尾部显示。
-- 崩溃排查：`devecocli log --crash --bundle-name com.example.curaharmony`
+- 崩溃排查：`devecocli log --crash --bundle-name com.example.SliceForge`
 - 应用内状态栏显示引擎版本，便于确认原生库是否加载成功。
 
 ## 许可与合规

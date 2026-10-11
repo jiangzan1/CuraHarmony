@@ -83,6 +83,51 @@ struct Mat4
         return result;
     }
 
+    static Mat4 scale(const Vec3 &s)
+    {
+        Mat4 result = identity();
+        result.m[0] = s.x;
+        result.m[5] = s.y;
+        result.m[10] = s.z;
+        return result;
+    }
+
+    static Mat4 rotationX(const float radians)
+    {
+        Mat4 result = identity();
+        const float c = std::cos(radians);
+        const float s = std::sin(radians);
+        result.m[5] = c;
+        result.m[6] = s;
+        result.m[9] = -s;
+        result.m[10] = c;
+        return result;
+    }
+
+    static Mat4 rotationY(const float radians)
+    {
+        Mat4 result = identity();
+        const float c = std::cos(radians);
+        const float s = std::sin(radians);
+        result.m[0] = c;
+        result.m[2] = -s;
+        result.m[8] = s;
+        result.m[10] = c;
+        return result;
+    }
+
+    static Mat4 rotationZ(const float radians)
+    {
+        Mat4 result = identity();
+        const float c = std::cos(radians);
+        const float s = std::sin(radians);
+        result.m[0] = c;
+        result.m[1] = s;
+        result.m[4] = -s;
+        result.m[5] = c;
+        return result;
+    }
+
     static Mat4 perspective(const float fov_y_radians, const float aspect, const float near_plane, const float far_plane)
     {
         Mat4 result;
@@ -134,6 +179,20 @@ inline Mat4 operator*(const Mat4 &a, const Mat4 &b)
         }
     }
     return result;
+}
+
+// Transforms a point by a column-major 4x4 matrix (perspective divide when needed).
+inline Vec3 transformPoint(const Mat4 &matrix, const Vec3 &point)
+{
+    const float x = matrix.m[0] * point.x + matrix.m[4] * point.y + matrix.m[8] * point.z + matrix.m[12];
+    const float y = matrix.m[1] * point.x + matrix.m[5] * point.y + matrix.m[9] * point.z + matrix.m[13];
+    const float z = matrix.m[2] * point.x + matrix.m[6] * point.y + matrix.m[10] * point.z + matrix.m[14];
+    const float w = matrix.m[3] * point.x + matrix.m[7] * point.y + matrix.m[11] * point.z + matrix.m[15];
+    if (w != 0.0F && w != 1.0F)
+    {
+        return Vec3{ x / w, y / w, z / w };
+    }
+    return Vec3{ x, y, z };
 }
 
 } // namespace curaharmony

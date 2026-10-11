@@ -2,15 +2,15 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "CuraHarmony 3D 打印切片工具"
+      "value": "SliceForge 3D 打印切片工具"
     },
     {
       "name": "EntryAbility_desc",
-      "value": "CuraHarmony：导入 STL、3D 预览、切片并 USB 串口打印"
+      "value": "SliceForge：导入 STL/3MF、3D 预览、切片并 USB 串口打印"
     },
     {
       "name": "EntryAbility_label",
-      "value": "CuraHarmony"
+      "value": "SliceForge"
     }
   ]
 }

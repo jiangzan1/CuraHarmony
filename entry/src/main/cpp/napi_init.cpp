@@ -9,7 +9,7 @@
 namespace
 {
 
-constexpr const char *ENGINE_INFO = "CuraHarmony native bridge (CuraEngine 5.14.0-alpha.0, OHOS aarch64)";
+constexpr const char *ENGINE_INFO = "SliceForge native bridge (CuraEngine 5.14.0-alpha.0, OHOS aarch64)";
 
 napi_value MakeString(napi_env env, const std::string &text)
 {

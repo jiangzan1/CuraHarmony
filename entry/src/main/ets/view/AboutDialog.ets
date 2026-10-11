@@ -60,7 +60,10 @@ export struct AboutDialog {
           this.controller.close();
         })
     }
-    .width(560)
+    // Responsive: a fixed 560vp width overflowed phone screens (both sides were clipped). Use 90% of
+    // the window and cap it at 560vp so phones and 2in1 both look right.
+    .width('90%')
+    .constraintSize({ maxWidth: 560, maxHeight: '80%' })
     .padding(18)
     .backgroundColor('#1b1e23')
     .borderRadius(12)

@@ -39,7 +39,7 @@ $profileFile = Join-Path $OutDir "cura harmonyRelease.p7b"
 $keystoreFile = Join-Path $OutDir "curaharmony.p12"
 
 $unsignedApp = Join-Path $projectRoot "build\outputs\default\CuraHarmony-default-unsigned.app"
-$outApp = Join-Path $OutDir "CuraHarmony-$Version-release.app"
+$outApp = Join-Path $OutDir "SliceForge-$Version-release.app"
 
 foreach ($p in @($node, $hvigor, $java, $signTool, $certFile, $profileFile, $keystoreFile)) {
     if (-not (Test-Path -LiteralPath $p)) { throw "缺少文件: $p" }

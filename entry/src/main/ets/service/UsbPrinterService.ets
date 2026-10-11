@@ -236,6 +236,11 @@ export class UsbPrinterService {
   }
 
   printGCode(content: string): void {
+    if (this.printing) {
+      // Repeated taps must not restart the queue from line 0.
+      hilog.warn(DOMAIN, 'UsbPrinter', 'PRINT_SKIP already printing');
+      return;
+    }
     if (!this.client.isOpen()) {
       this.state = '请先连接打印机';
       hilog.warn(DOMAIN, 'UsbPrinter', 'PRINT_SKIP not connected');

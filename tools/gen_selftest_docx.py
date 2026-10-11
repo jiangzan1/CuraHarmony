@@ -9,7 +9,7 @@ from __future__ import annotations
 import pathlib
 import zipfile
 
-OUT = pathlib.Path(r"E:\Users\jiangzan\cura\证书\CuraHarmony-自测说明.docx")
+OUT = pathlib.Path(r"E:\Users\jiangzan\cura\证书\SliceForge-自测说明.docx")
 
 CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -25,9 +25,9 @@ RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 
 # (level, text): level 0 = title, 1 = heading, 2 = body
 DOC: list[tuple[int, str]] = [
-    (0, "CuraHarmony 自测说明（提交审核）"),
+    (0, "SliceForge 自测说明（提交审核）"),
     (1, "一、应用信息"),
-    (2, "应用名称：CuraHarmony"),
+    (2, "应用名称：SliceForge"),
     (2, "包名：com.jiangzan.curaharmony"),
     (2, "版本：1.1.0"),
     (2, "适用设备：2in1（PC / 二合一电脑）、平板、手机"),
@@ -42,7 +42,7 @@ DOC: list[tuple[int, str]] = [
     (2, "4. 平板/手机：界面为移动端布局（预览全屏 + 可收起的底部“面板”），不包含任何打印相关入口。"),
     (1, "三、自测步骤（无需打印机）"),
     (2, "步骤 1  启动应用：首次启动会弹出“隐私政策”对话框，点击“同意”。"
-        "预期进入主界面：顶部为 CuraHarmony 标题与 导入模型 / 切片 / 模式：旋转 / 关于 按钮；"
+        "预期进入主界面：顶部为 SliceForge 标题与 导入模型 / 切片 / 模式：旋转 / 关于 按钮；"
         "左侧为“打印机”“打印设置”面板；中间为 3D 预览，显示一个立方体与打印平台网格。"),
     (2, "步骤 2  3D 预览交互：在中间预览区按住拖动可旋转视角；触屏双指捏合可缩放；"
         "点击顶部“模式：旋转”切换到“模式：移动”后，拖动可在打印平台上平移模型。"),
@@ -66,7 +66,7 @@ DOC: list[tuple[int, str]] = [
     (2, "1. 本应用不采集个人信息、无网络权限、无第三方 SDK、无广告。"),
     (2, "2. 所有模型文件与生成的 G-code 仅保存在本机应用沙箱内，卸载即删除。"),
     (2, "3. 隐私政策：https://agreement-drcn.hispace.dbankcloud.cn/index.html?lang=zh&agreementId=2056798714009282496"),
-    (2, "4. 对应源码（AGPL-3.0）：https://github.com/jiangzan1/CuraHarmony"),
+    (2, "4. 对应源码（AGPL-3.0）：https://github.com/jiangzan1/SliceForge"),
 ]
 
 

@@ -166,6 +166,12 @@ export class Mesh3mf {
         } catch (error) {
             // Not present yet: nothing to clean.
         }
+        // The destination path must exist before decompression.
+        try {
+            fs.mkdirSync(tmpDir);
+        } catch (error) {
+            // Already created by a concurrent call: reuse it.
+        }
 
         try {
             const task: taskpool.Task = new taskpool.Task(convert3mfTask, zipPath, tmpDir, stlPath);
